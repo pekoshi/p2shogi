@@ -3,7 +3,6 @@
 
 # normal     : 通常使用版(配布用の実行ファイルはこちら)
 # tournament : 大会で使う用(通常版よりややEloが高いが使える機能に制限がある)
-# pgo        : tournamentをPGOで最適化(Clang/GCC、生成エンジンを実行できる環境用)
 
 # === ビルドオプション (build options) ===
 
@@ -55,9 +54,7 @@ YANEURAOU_EDITION = YANEURAOU_ENGINE_NNUE
 # AMDのRyzen(Zen/Zen2)はZEN1/ZEN2を選択するとBMI2命令が使わずに速くなる。(10%程度高速化)
 # Ryzen Zen3シリーズはZEN3を選択。(clang/llvm 13.0.0以降、gcc 11.2以降)
 #
-# ARM系は汎用ARMv8ならARMV8、dot product対応ならARMV8_DOTPRODを指定する。
-# Windows ARM64の汎用targetとしてWINARM64も指定できる。WINARM64はARMV8と同等。
-# AWS Graviton2ならGRAVITON2を指定する。
+# ARM系はGraviton2ならGRAVITON2、これ以外ならOTHERを指定する。
 # Windows x86(32bit環境)用はNO_SSEを指定する。
 #
 # AVX-512対応(サーバー向けSkylake以降)ならAVX512を指定する。
@@ -81,12 +78,8 @@ TARGET_CPU = AVX2
 #TARGET_CPU = ZEN1
 #TARGET_CPU = ZEN2
 #TARGET_CPU = ZEN3
-#TARGET_CPU = ZEN3AVX512VNNI
 # -- ARMとか
 #TARGET_CPU = OTHER
-#TARGET_CPU = WINARM64
-#TARGET_CPU = ARMV8
-#TARGET_CPU = ARMV8_DOTPROD
 #TARGET_CPU = GRAVITON2
 #TARGET_CPU = WASM
 # -- macOS for Intel
@@ -111,13 +104,6 @@ COMPILER = clang++
 # ※ NNUEの未知なarchitectureの時にarchitecture headerを動的に生成するのに用いる。
 PYTHON = python
 
-# PGOの訓練設定。パスはsource/からの相対パスでも指定できる。
-PGO_EVAL_DIR ?= ../eval
-PGO_BENCH    ?= 1024 1 14 default depth
-PGO_TIMEOUT  ?= 600
-# llvm-profdataはClangと同じディレクトリやバージョン付きの名前から自動検索する。
-PGO_PROFDATA ?=
-
 # YANEURAOU_ENGINE_ 以降を architecture 名として扱う。
 # NNUE_ prefix は任意で、SFNN_* もNNUE系のarchitectureとして解釈する。
 ENGINE_ARCH       := $(patsubst YANEURAOU_ENGINE_%,%,$(YANEURAOU_EDITION))
@@ -128,7 +114,7 @@ IS_NNUE_EDITION   := $(filter NNUE NNUE_% SFNN%,$(ENGINE_ARCH_UPPER))
 INVALID_ENGINE_ARCH := $(strip $(findstring SFNNWOP,$(ENGINE_ARCH_UPPER)) $(findstring LS9,$(ENGINE_ARCH_UPPER)))
 
 ifneq (,$(INVALID_ENGINE_ARCH))
-$(error Unsupported YANEURAOU_EDITION '$(YANEURAOU_EDITION)'. Use SFNN1536, SFNN_... without suffix, or SFNN_..._hand4/16/64/64z/256/1024 / SFNN_..._k3k3 / SFNN_..._k9k9 / SFNN_..._k9k9z / SFNN_..._k13k13z / SFNN_..._k21k21 / SFNN_..._k29k29 / SFNN_..._progress2/3/4/8/16/32)
+$(error Unsupported YANEURAOU_EDITION '$(YANEURAOU_EDITION)'. Use SFNN1536 or SFNN_..._k3k3 / SFNN_..._king3_by_king3)
 endif
 
 # エンジンの表示名 (engine displayname)
@@ -150,16 +136,12 @@ LDFLAGS       =
 LIBS          =
 INCLUDE       = # -I../include
 
-# 再帰makeに渡すフラグ内の空白や引用符を保持する。
-shell_quote = '$(subst ','"'"',$(1))'
-
 # makeするときにCPPFLAGS,LDFLAGSを追加で指定したいときはこれを用いる。
 EXTRA_CPPFLAGS =
 EXTRA_LDFLAGS  =
 
 CPPFLAGS += $(EXTRA_CPPFLAGS)
 LDFLAGS  += $(EXTRA_LDFLAGS)
-COMPILER_MACHINE := $(shell $(COMPILER) -dumpmachine 2>/dev/null)
 
 # YANEURAOU_EDITION = YANEURAOU_ENGINE_MATERIALのときに指定できる、評価関数の通し番号
 #  1 : 普通の駒得のみの評価関数
@@ -240,18 +222,9 @@ else
 		EM_EXPORT_NAME=YaneuraOu
 		EM_INITIAL_MEMORY_SIZE=$(shell if [ $(MATERIAL_LEVEL) -ge 5 ]; then echo 385875968; else echo 138412032; fi)
 		CPPFLAGS += -Wno-unused-parameter
-		# 🚧 ワークアラウンド : USE_WASM_SIMDは定義しない。
-		#     eval/nnue/wasm_simd.cppのカーネルは重みを行優先の配置で読むが、
-		#     USE_SSE42からUSE_SSSE3が有効になるため、AffineTransform::GetWeightIndex()は
-		#     重みをSSSE3向けに並べ替えて格納する。この不整合により、AffineTransformの
-		#     出力が正しくならない。
-		#     定義しなくても-msse4.2と-msimd128により、SSSE3向けの実装が
-		#     wasm simd128にコンパイルされる。
-		CPPFLAGS += -msimd128
+		CPPFLAGS += -DUSE_WASM_SIMD -msimd128
 		CPPFLAGS += -DUSE_SSE42 -msse4.2
-		# Stockfish同様、WASMではRelaxedAtomicの軽量経路を使う。
-		# ただしポインター幅より大きな型などは、RelaxedAtomic側の判定でatomicを維持する。
-		CPPFLAGS += -pthread -DUSE_SLOPPY_ATOMICS
+		CPPFLAGS += -pthread
 		CPPFLAGS += -s STRICT=1
 		LDFLAGS += --pre-js wasm_pre.js
 		# LDFLAGS += --preload-file eval/nn.bin
@@ -275,12 +248,6 @@ else
 	ifeq ($(OS),Windows_NT)
 		CPPFLAGS += $(WCPPFLAGS)
 		LDFLAGS += -static -Wl,--stack,25000000
-		# 32bit Windows版はworker/history/TT/NNUEで仮想アドレス空間を多く使う。
-		# 64bit Windows上で2GB制限に当たらないよう large-address-aware を付ける。
-		# 64bitビルドでは不要で、古いMSYS2/GCCのldでは未対応なので付けない。
-		ifneq (,$(findstring i686,$(COMPILER_MACHINE) $(COMPILER)))
-			LDFLAGS += -Wl,--large-address-aware
-		endif
 		TARGET = $(TARGETDIR)/YaneuraOu-by-gcc.exe
 	else
 		CPPFLAGS += -D_LINUX
@@ -320,14 +287,10 @@ ifeq "$(strip $(OBJDIR))" ""
 	OBJDIR = ..
 endif
 
-# 各実行で新しい作業ディレクトリを作り、通常ビルドや古いプロファイルと分離する。
-PGO_DIR ?= $(OBJDIR)/pgo
-
 #SOURCES  = $(wildcard *.cpp)
 SOURCES  = \
 	main.cpp                                                                   \
 	types.cpp                                                                  \
-	attacks.cpp                                                                \
 	bitboard.cpp                                                               \
 	misc.cpp                                                                   \
 	movegen.cpp                                                                \
@@ -347,10 +310,8 @@ SOURCES  = \
 	book/book.cpp                                                              \
 	book/apery_book.cpp                                                        \
 	book/policybook.cpp                                                        \
+	book/bookaware.cpp                                                         \
 	extra/bitop.cpp                                                            \
-	extra/tools.cpp                                                            \
-	extra/system_io.cpp                                                            \
-	extra/parser.cpp                                                            \
 	extra/long_effect.cpp                                                      \
 	extra/sfen_packer.cpp                                                      \
 	mate/mate.cpp                                                              \
@@ -453,12 +414,9 @@ endif
 ifneq (,$(IS_NNUE_EDITION))
 	ifeq ($(ENGINE_ARCH_UPPER),NNUE)
 	else
-		# architecture名に応じて、従来NNUEとSFNNの構成を切り替える。
-		ifneq (,$(filter SFNN%,$(NNUE_ARCH_UPPER)))
-			CPPFLAGS += -DYANEURAOU_ENGINE_SFNN
-		else
-			CPPFLAGS += -DYANEURAOU_ENGINE_NNUE
-		endif
+		# NNUE_* または SFNN_* は標準NNUE型の亜種なので、とりあえず
+		# "YANEURAOU_ENGINE_NNUE"というシンボルを定義してやる。
+		CPPFLAGS += -DYANEURAOU_ENGINE_NNUE
 
 		ifeq ($(ENGINE_ARCH_UPPER),NNUE_KP256)
 			CPPFLAGS += -DEVAL_NNUE_KP256
@@ -480,17 +438,16 @@ ifneq (,$(IS_NNUE_EDITION))
 
 		else ifeq ($(ENGINE_ARCH_UPPER),SFNN1536)
 			CPPFLAGS += -DYANEURAOU_ENGINE_SFNN1536
+			CPPFLAGS += -DSFNNwoPSQT
 		else
 			# 知らないNNUEのarchitectureなので、architecture headerを動的に生成する。
 			ARCH_HEADER_FILE = \"architectures/$(NNUE_ARCH).h\"
 			CPPFLAGS += -DNNUE_ARCHITECTURE_HEADER=$(ARCH_HEADER_FILE)
 			ARCH_GEN_SCRIPT = $(PYTHON) eval/nnue/architectures/nnue_arch_gen.py $(NNUE_ARCH) eval/nnue/architectures
 
-			# SFNN_* の層形状に応じたSIMD経路を選択する。
+			# SFNN_* はPSQTなしSFNNなので、シンボル SFNNwoPSQT 定義しておく。
 			ifneq (,$(filter SFNN%,$(NNUE_ARCH_UPPER)))
-				ifneq (,$(findstring _7_,$(NNUE_ARCH_UPPER)))
-					CPPFLAGS += -DNNUE_SFNN_HIDDEN1_7
-				endif
+				CPPFLAGS += -DSFNNwoPSQT
 			endif
 		endif
 	endif
@@ -519,13 +476,6 @@ ifneq (,$(IS_NNUE_EDITION))
 	endif
 	ifeq ($(EVAL_EMBEDDING),ON)
 		CPPFLAGS += -DNNUE_EMBEDDING
-		ifneq (,$(findstring em++,$(COMPILER)))
-			# 📝 incbin.hによるパラメーターの埋め込みは、.incbinで置いたデータシンボルを
-			#     wasm-ldがリンクできないため使えない。代わりに、パラメーターを文字列リテラルとして
-			#     持つembedded_nnue.cppをリンクする。このファイルはtools/build/wasm_build.jsが生成する。
-			SOURCES += \
-				eval/nnue/embedded_nnue.cpp
-		endif
 	endif
 endif
 
@@ -544,6 +494,13 @@ endif
 ifeq ($(YANEURAOU_EDITION),USER_ENGINE)
 	SOURCES += \
 		engine/user-engine/user-search.cpp
+endif
+
+# p2shogi NNUE 移植版(独自評価器。NNUE archは不要)。
+ifeq ($(YANEURAOU_EDITION),YANEURAOU_ENGINE_P2NNUE)
+	SOURCES += \
+		eval/p2nnue/p2nnue.cpp \
+		engine/yaneuraou-engine/yaneuraou-search.cpp
 endif
 
 
@@ -585,9 +542,6 @@ else ifeq ($(TARGET_CPU),ZEN2)
 else ifeq ($(TARGET_CPU),ZEN3)
 	CPPFLAGS += -DUSE_AVX2 -DUSE_BMI2 -mbmi -mbmi2 -mavx2 -march=znver3
 
-else ifeq ($(TARGET_CPU),ZEN3AVX512VNNI)
-	CPPFLAGS += -DUSE_AVX512 -DUSE_BMI2 -DUSE_VNNI -march=znver3 -mbmi -mbmi2 -mavx512f -mavx512bw -mavx512vl -mavx512dq -mavx512vnni -mprefer-vector-width=512
-
 # それ以外は、AVX512,AVX2,SSE4.2,SSE4.1,SSE2のように利用できるCPU拡張命令で振り分ける。
 # AVX2より上位のCPUなら普通は(Intel系なら)BMI2命令を使ったほうが速いので"USE_BMI2"を指定しておく。
 
@@ -613,7 +567,12 @@ else ifeq ($(TARGET_CPU),AVX512)
 	CPPFLAGS += -DUSE_AVX512 -DUSE_BMI2 -march=skylake-avx512
 
 else ifeq ($(TARGET_CPU),AVX2)
-	CPPFLAGS += -DUSE_AVX2 -DUSE_BMI2 -mbmi -mbmi2 -mavx2 -march=corei7-avx
+	# ★NPS最適化(2026-07-31, fable5発見): -march=corei7-avx は Sandy Bridge tune で
+	#   FeatureSlowUAMem32 が有効 → 256bit unaligned load/store が 128bit×2+vinserti128 に分割され
+	#   NNUE SIMD 全域が 2〜3倍の命令数になる。実CPU=i7-7700(Kaby Lake)ゆえ native tune で解消。
+	#   -ffp-contract=off は corei7-avx(FMA3非対応)との bit-exact 維持のため(FMA契約でfloat変化を防ぐ)。
+	#   整数SIMDの256bit化(=本体の高速化)はFMA無関係ゆえ効果は温存。
+	CPPFLAGS += -DUSE_AVX2 -DUSE_BMI2 -mbmi -mbmi2 -mavx2 -march=native -ffp-contract=off
 
 else ifeq ($(TARGET_CPU),SSE42)
 	CPPFLAGS += -DUSE_SSE42 -msse4.2 -march=corei7
@@ -635,15 +594,6 @@ else ifeq ($(TARGET_CPU),GRAVITON2)
 	# for Amazon Web Servece EC2, the Graviton2 CPU [M6g/M6gd, C6g/C6gd/C6gn, R6g/R6gd, T4g, X2gd] instances
 	# https://github.com/aws/aws-graviton-getting-started/blob/main/c-c++.md
 	CPPFLAGS += -DIS_64BIT -DUSE_NEON=8 -march=armv8.2-a+fp16+rcpc+dotprod+crypto
-else ifeq ($(TARGET_CPU),WINARM64)
-	# Windows ARM64 baseline. Stockfishのarmv8相当。
-	CPPFLAGS += -DIS_64BIT -DUSE_NEON=8
-else ifeq ($(TARGET_CPU),ARMV8)
-	# Generic AArch64 baseline. Stockfishのarmv8相当。
-	CPPFLAGS += -DIS_64BIT -DUSE_NEON=8
-else ifeq ($(TARGET_CPU),ARMV8_DOTPROD)
-	# ARMv8 + Int8 dot product. Stockfishのarmv8-dotprod相当。
-	CPPFLAGS += -DIS_64BIT -DUSE_NEON=8 -DUSE_NEON_DOTPROD -march=armv8.2-a+dotprod
 else ifeq ($(TARGET_CPU),APPLEAVX2)
 	CPPFLAGS += -DIS_64BIT -DUSE_AVX2 -DUSE_BMI2 -target x86_64-apple-macos11 -mbmi -mbmi2 -mavx2 -mpopcnt
 else ifeq ($(TARGET_CPU),APPLESSE42)
@@ -696,40 +646,27 @@ endif
 
 # 通常使用。
 normal: run_python_script
-	$(MAKE) CPPFLAGS=$(call shell_quote,$(CPPFLAGS) $(LTOFLAGS)) LDFLAGS=$(call shell_quote,$(LDFLAGS) $(LTOFLAGS)) $(TARGET)
+	$(MAKE) CPPFLAGS='$(CPPFLAGS) $(LTOFLAGS)' LDFLAGS='$(LDFLAGS) $(LTOFLAGS)' $(TARGET)
 
 # トーナメント用
 tournament: run_python_script
-	$(MAKE) CPPFLAGS=$(call shell_quote,$(CPPFLAGS) $(LTOFLAGS) -DFOR_TOURNAMENT) LDFLAGS=$(call shell_quote,$(LDFLAGS) $(LTOFLAGS)) $(TARGET)
+	$(MAKE) CPPFLAGS='$(CPPFLAGS) $(LTOFLAGS) -DFOR_TOURNAMENT' LDFLAGS='$(LDFLAGS) $(LTOFLAGS)' $(TARGET)
 
-# gprof用の計測ビルド。
+#　とりあえずPGOはAVX2とSSE4.2専用
 prof:
 	$(MAKE) CPPFLAGS='$(CPPFLAGS) -pg' tournament
 
-PGO_COMMAND = $(PYTHON) ../tools/build/pgo.py \
-	--make $(call shell_quote,$(MAKE)) \
-	--compiler $(call shell_quote,$(COMPILER)) \
-	--edition $(call shell_quote,$(YANEURAOU_EDITION)) \
-	--cpu $(call shell_quote,$(TARGET_CPU)) \
-	--target $(call shell_quote,$(TARGET)) \
-	--work-dir $(call shell_quote,$(PGO_DIR)) \
-	--cppflags=$(call shell_quote,$(EXTRA_CPPFLAGS)) \
-	--ldflags=$(call shell_quote,$(EXTRA_LDFLAGS)) \
-	--eval-dir $(call shell_quote,$(PGO_EVAL_DIR)) \
-	--bench $(call shell_quote,$(PGO_BENCH)) \
-	--timeout $(call shell_quote,$(PGO_TIMEOUT)) \
-	--profdata $(call shell_quote,$(PGO_PROFDATA))
-
-# 個別実行も可能。profgenの出力で手動訓練した後、同じ設定でprofuseを呼ぶ。
 profgen:
-	+$(PGO_COMMAND) generate
+	$(MAKE) CPPFLAGS='$(CPPFLAGS) -fprofile-generate -lgcov' LDFLAGS='$(LDFLAGS) -fprofile-generate -lgcov'
 
 profuse:
-	+$(PGO_COMMAND) use
+	$(MAKE) CPPFLAGS='$(CPPFLAGS) $(LTOFLAGS) -fprofile-use -lgcov' LDFLAGS='$(LDFLAGS) -fprofile-use -lgcov $(LTOFLAGS)'
 
-# 計測用ビルド→benchによる訓練→集約→本番ビルドをすべてtournamentで行う。
 pgo:
-	+$(PGO_COMMAND) all
+	$(MAKE) profgen
+	@./$(TARGET) EvalDir ../build/eval , bench , quit
+	@touch $(SOURCES)
+	$(MAKE) profuse
 
 clean:
 	rm -f $(OBJECTS) $(CUDA_OBJECTS) $(OBJC_OBJECTS) $(DEPENDS) $(TARGET) ${OBJECTS:.o=.gcda}

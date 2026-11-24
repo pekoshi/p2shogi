@@ -1,18 +1,13 @@
-﻿#ifndef BOOK_H_INCLUDED
-#define BOOK_H_INCLUDED
+﻿#ifndef _BOOK_H_INCLUDED_
+#define _BOOK_H_INCLUDED_
 
 #include "../types.h"
-#include "../extra/tools.h"
 #include "../position.h"
 #include "../misc.h"
 #include "../usi.h"
 #include "../testcmd/unit_test.h"
 
-#include <fstream>
-#include <memory>
-#include <mutex>
 #include <unordered_map>
-#include <vector>
 
 namespace YaneuraOu {
 
@@ -33,9 +28,6 @@ struct ProbeResult {
     // ⚠ cpに変換後のもの。
     //     ValueからならScore::from_internal_score()で変換したものを設定する。
     Score bestscore = 0;
-
-    // 選択した定跡手の探索深さ。定跡以外の探索省略では0。
-    int depth = 0;
 
     // pondermove(なければMOVE_NONE)
     Move pondermove;
@@ -229,7 +221,7 @@ struct MemoryBook
 	void foreach(std::function<void(const std::string& /*sfen*/, const Book::BookMovesPtr)> f);
 
 	// 保持している局面数を返す。これは、on the flyではない状態でread_book()した時にのみ有効。
-	size_t size() const { return ybb_memory_book ? static_cast<size_t>(ybb_record_count) : book_body.size(); }
+	size_t size() const { return book_body.size(); }
 
 protected:
 
@@ -249,9 +241,6 @@ protected:
 
 	// sfenで指定された局面の情報を定跡DBファイルにon the flyで探して、それを返すヘルパー関数。
 	BookMovesPtr find_bookmoves_on_the_fly(std::string sfen);
-	BookMovesPtr find_ybb_bookmoves_on_the_fly(const Position& pos);
-	BookMovesPtr find_ybb_bookmoves_on_the_fly(const PackedSfen& target, uint16_t game_ply);
-	BookMovesPtr find_ybb_bookmoves_in_memory(const PackedSfen& target, uint16_t game_ply);
 
 	// メモリに丸読みせずにfind()のごとにファイルを調べにいくのか。
 	// これは思考エンジン設定のOptions["BookOnTheFly"]の値を反映したもの。
@@ -263,39 +252,26 @@ protected:
 	// これが異なるならファイルの読み直しが必要になる。
 	bool ignoreBookPly = false;
 
-	// 上のon_the_fly == trueのときに、開いている従来形式(.db)の定跡ファイルハンドル。
+	// 上のon_the_fly == trueのときに、開いている定跡ファイルのファイルハンドル
 	std::fstream fs;
 
-	// ybb_book == trueのときに開いている、やねうら王 バイナリ定跡DBのindex領域読み込み用file。
-	// 同じ .ybb を index / moves 用に2つ開く。
+	// --- YANE-BINBOOK-V1 (.ybb) バイナリ定跡 on-the-fly reader 用の状態 ---
+	// index(局面)読み込み用ハンドルと moves(指し手)読み込み用ハンドル。
+	// 同一ファイルを2ハンドルで開く(seek位置が独立するため)。
 	std::fstream ybb_index_fs;
-
-	// ybb_book == trueのときに開いている、やねうら王 バイナリ定跡DBのmoves領域読み込み用file。
-	// 同じ .ybb を index / moves 用に2つ開く。
 	std::fstream ybb_moves_fs;
-
-	// ybb_memory_book == trueのときに、.ybb 全体を丸読みして保持するバッファ。
-	std::vector<unsigned char> ybb_index_data;
-
-	// moves record の先頭位置。
-	// .ybb の index 領域の直後。
+	// moves 領域の先頭オフセット (= header + index 全体のサイズ)。
 	uint64_t ybb_moves_base = 0;
-
-	// .ybbのindex file headerに書かれている局面レコード数。
+	// index レコード数(局面数)。
 	uint64_t ybb_record_count = 0;
-
-	// .ybbのindex file headerに書かれているflags。
-	// bit0が立っているなら、moves fileの各指し手recordにdepth(uint16)が含まれる。
+	// header の flags。
 	uint64_t ybb_flags = 0;
-
-	// BookOnTheFly=trueで.ybbを開いている状態ならtrue。
+	// ybb バイナリ定跡を開いているか。
 	bool ybb_book = false;
 
-	// BookOnTheFly=falseで.ybbをメモリに丸読みしている状態ならtrue。
-	bool ybb_memory_book = false;
-
-	// 開いている/丸読みしている.ybb名。エラー表示やデバッグ用。
-	std::string ybb_moves_name;
+	// [ASYNC] ybb バイナリ定跡から target(PackedSfen)を二分探索して指し手集合を返す。
+	// 見つからない/plyが一致しない場合は nullptr を返す。
+	BookMovesPtr find_ybb_bookmoves_on_the_fly(const PackedSfen& target, uint16_t game_ply);
 
 	// read_book()のときに読み込んだbookの名前
 	// ・on_the_fly == trueのときは、読み込む予定のファイルの名前。
@@ -332,33 +308,38 @@ struct BookMoveSelector
 			・定跡の指し手の選択は、思考エンジンのオプション設定に従う。
 			・定跡にhitしなかった場合はMOVE_NONEが返る。
 			・画面には何も表示しない。
-			・read_book()後、並列探索を開始する前に探索の制御スレッドから呼び出す。
-			・同じBookMoveSelectorに対して、複数スレッドから同時に呼び出してはならない。
+			・この関数自体はthread safeなのでread_book()したあとは非同期に呼び出して問題ない。
+	 　		ただし、on_the_flyのときは、ディスクアクセスが必要で、その部分がthread safeではないので
+			on_the_fly == falseでなければ、非同期にこの関数を呼び出してはならない。
 	*/
     ProbeResult probe(Position& pos, const Search::UpdateContext& updates);
 
 protected:
-	// メモリに読み込んだ定跡ファイル。
-	// user_book1-000.db, user_book1-001.ybb, user_book1.db のように、
-	// 優先定跡を複数持つことがあるので優先順に保持する。
-	std::vector<std::unique_ptr<MemoryBook>> memory_books;
+	// メモリに読み込んだ定跡ファイル
+	MemoryBook memory_book;
 
-	// 読み込んだ定跡ファイル名。memory_books と同じ順番。
-	std::vector<std::string> book_names;
+	// 🎯**2 本目の定跳** (2026-10-23 / ユーザー「3 でいきましょう」「478 優先で」)。
+	//   `BookFile2` が空でないときだけ読み、 **1 本目で引けなかったときだけ**引く。
+	//   用途: 1 本目 = 橋 + 478 (右玉の芽を残す) / 2 本目 = ヘタショック (序盤を埋める)。
+	//   🚨本家のマルチブック (-000.db / -001.ybb) を丸こと移植する必要は無い。
+	MemoryBook memory_book2;
 
-	// read_book()の再読み込み判定用。
-	bool book_on_the_fly = false;
-	bool ignoreBookPly = false;
+	// 🎯**3 本目の定跡** (2026-10-30 / ユーザー「478 優先でかつペタショックで基礎定跡、
+	//   ペタショックにもない箇所は 3 本目で補完」)。
+	//   `BookFile3` が空でないときだけ読み、 **1 本目と 2 本目で引けなかったときだけ**引く。
+	//   用途: 1 本目 = 橋 + 478 (自分の線) / 2 本目 = ペタショック (基礎定跡) /
+	//         3 本目 = **ペタショックにも無い局面を採掘したもの** (穴埋め)。
+	//   🚨2026-10-30 の初敗戦 (相掛かり) は **ply 30 まで ybb が持ち ply 32 から無かった**。
+	//     3 本目はその ply 32 以降を埋めるためのもの。
+	//   🚨既定 **空文字** = 3 本目なし = 従来と bit-exact。
+	MemoryBook memory_book3;
+
+	// 読み込んだ定跡ファイル名
+	std::string book_name;
 
 	// 定跡ファイル名を返す。
 	// Option["BookDir"]が定跡ファイルの入っているフォルダなのでこれを連結した定跡ファイルのファイル名を返す。
 	std::string get_book_name() const;
-
-	// 優先定跡を含む定跡ファイル名を返す。先頭ほど優先度が高い。
-	std::vector<std::string> get_book_names() const;
-
-	// 優先度の高い定跡から順にprobeする。
-	BookMovesPtr find_in_books(Position& pos);
 
 	// probe()の下請け
 	// forceHit == trueのときは、設定オプションの値を無視して強制的に定跡にhitさせる。(BookPvMovesの実装で用いる)
@@ -367,19 +348,17 @@ protected:
 	// GenerateAllLegalMovesがfalseの時、歩の不成の指し手を返さないことも保証する。
 	// 但し、ponderMoveが合法手であることは保証しない。
 	//
-	// 以下の出力引数は、この関数がtrueを返した時のみ有効。
+	// 以下の3つの変数は、この関数がtrueを返した時のみ有効。
 	// isRoot     : rootPosは、最初に渡されたrootPosと同じrootの局面。
 	// bestMove   : 今回選択された指し手
 	// ponderMove : bestMoveの次の定跡の指し手 
 	// value      : bestMoveの評価値。
-	// depth      : bestMoveの定跡に記録された探索深さ。
     bool probe_impl(Position&                    rootPos,
                     bool                         isRoot,
                     const Search::UpdateContext& updates,
                     Move16&                      bestMove,
                     Move16&                      ponderMove,
                     Value&                       value,
-                    int&                         depth,
                     bool                         forceHit = false);
 
 	// 定跡のpv文字列を生成して返す。
@@ -387,7 +366,7 @@ protected:
 	// rest_ply : 残り出力するPVの手数
     std::string pv_builder(Position& pos, const Search::UpdateContext& updates, Move16 m, int rest_ply);
 
-	PRNG prng;
+	AsyncPRNG prng;
 
 	// init()で渡されたOptionsMap
 	OptionsMapRef options;
@@ -411,7 +390,7 @@ namespace BookTools
 // 
 // position_callbackは、その局面と、その局面での指し手が引数にセットされて呼び出される。
 // 与えたsfenの最後の局面では、MoveはMove::none()が入って呼び出される。
-void feed_position_string(Position& pos, const std::string& root_sfen,
+void feed_position_string(Position& pos, const std::string& root_sfen, std::deque<StateInfo>& si,
 	const std::function<void(Position&, Move)>& position_callback = [](Position&, Move) {});
 
 // 平手、駒落ちの開始局面集

@@ -1,7 +1,6 @@
-﻿#ifndef NN_COREML_H_INCLUDED
-#define NN_COREML_H_INCLUDED
+﻿#ifndef __NN_COREML_H_INCLUDED__
+#define __NN_COREML_H_INCLUDED__
 #include "../../config.h"
-#include "../../extra/tools.h"
 
 #if defined(YANEURAOU_ENGINE_DEEP)
 #if defined(COREML)
@@ -41,5 +40,5 @@ namespace Eval::dlshogi {
 
 #endif // defined(COREML)
 #endif // defined(YANEURAOU_ENGINE_DEEP)
-#endif // ndef NN_COREML_H_INCLUDED
+#endif // ndef __NN_COREML_H_INCLUDED__
 

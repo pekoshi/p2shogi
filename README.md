@@ -1,157 +1,74 @@
-﻿<p>
-<a href="https://github.com/yaneurao/YaneuraOu/actions/workflows/make-msys2.yml"><img align="left" alt="Make CI (MSYS2 for Windows)" src="https://github.com/yaneurao/YaneuraOu/actions/workflows/make-msys2.yml/badge.svg?event=push"></a>
-<a href="https://github.com/yaneurao/YaneuraOu/actions/workflows/make-deep-windows.yml"><img align="left" alt="Make CI (DeepLearning for Windows)" src="https://github.com/yaneurao/YaneuraOu/actions/workflows/make-deep-windows.yml/badge.svg?event=push"></a>
-<a href="https://github.com/yaneurao/YaneuraOu/actions/workflows/make-mingw.yml"><img align="left" alt="Make CI (MinGW for Windows)" src="https://github.com/yaneurao/YaneuraOu/actions/workflows/make-mingw.yml/badge.svg?event=push"></a>
-<a href="https://github.com/yaneurao/YaneuraOu/actions/workflows/make.yml"><img align="left" alt="Make CI (for Ubuntu Linux)" src="https://github.com/yaneurao/YaneuraOu/actions/workflows/make.yml/badge.svg?event=push"></a>
-<a href="https://github.com/yaneurao/YaneuraOu/actions/workflows/make-deep-ubuntu.yml"><img align="left" alt="Make CI (DeepLearning for Ubuntu Linux)" src="https://github.com/yaneurao/YaneuraOu/actions/workflows/make-deep-ubuntu.yml/badge.svg?event=push"></a>
-<a href="https://github.com/yaneurao/YaneuraOu/actions/workflows/ndk.yml"><img align="left" alt="NDK CI (for Android)" src="https://github.com/yaneurao/YaneuraOu/actions/workflows/ndk.yml/badge.svg?event=push"></a>
-<a href="https://github.com/yaneurao/YaneuraOu/actions/workflows/make-macos.yml"><img align="left" alt="Make CI (for macOS)" src="https://github.com/yaneurao/YaneuraOu/actions/workflows/make-macos.yml/badge.svg?event=push"></a>
-<a href="https://github.com/yaneurao/YaneuraOu/actions/workflows/make-wasm.yml"><img align="left" alt="Make CI (for WebAssembly)" src="https://github.com/yaneurao/YaneuraOu/actions/workflows/make-wasm.yml/badge.svg?event=push"></a>
-<br clear="left">
-</p>
+# p2shogi v9
 
-# About this project
+やねうら王をベースにした将棋の思考エンジン (USI) です。評価関数は独自の NNUE (p2nnue) を使います。
 
-YaneuraOu is the World's Strongest Shogi engine(AI player) , WCSC29 1st winner , educational and USI compliant engine.
+USI では `id name p2shogi v9` / `id author pekoshi` と名乗ります。
 
-やねうら王は、WCSC29(世界コンピュータ将棋選手権/2019年)、第4回世界将棋AI電竜戦本戦(2023年)などにおいて優勝した世界最強の将棋の思考エンジンです。教育的でUSIプロトコルに準拠しています。
+## 特徴
 
-- [WCSC29、やねうら王優勝しました！](http://yaneuraou.yaneu.com/2019/05/06/wcsc29%E3%80%81%E3%82%84%E3%81%AD%E3%81%86%E3%82%89%E7%8E%8B%E5%84%AA%E5%8B%9D%E3%81%97%E3%81%BE%E3%81%97%E3%81%9F%EF%BC%81/)
-- [第4回世界将棋AI電竜戦本戦 優勝記](https://yaneuraou.yaneu.com/2023/12/10/won-the-4th-shogi-ai-denryu-tournament/)
+- 評価関数 p2nnue: HalfKA_hm + 利き (threat) 入力 + 玉周りの補助入力 (KH)、LayerStack 8 本、L1 1024。
+- 序盤専用の評価関数 OPN (進行度 bucket 0 だけを担当)。
+- 探索パラメータは SPSA で調整し、エンジンの既定値に焼き込み済みです。対局時に探索の option を指定する必要はありません。
+- 千日手の評価値 (`DrawValueBlack` / `DrawValueWhite`) の既定は -2 / -2 (中立) です。
 
+## 棋力の目安
 
-# やねうら王プロジェクトを支援する
+- floodgate (`p2shogi_v9_nobook_nnue_i7700_4T`、定跡なし、Core i7-7700 の 4 スレッド): 2026-11-23 時点でレート 4248。
+- やねうら王系の強豪エンジンとの同ノード比較では、まだ互角に届いていません。
 
-[![やねうら王プロジェクトを支援する](tools/images/yaneuraou-sponsors-banner640x360.png "支援バナー")](https://yaneurao.fanbox.cc/)
+## 使い方
 
-- GitHub Sponsors : https://github.com/sponsors/yaneurao
-- FANBOX : https://yaneurao.fanbox.cc/
+[Releases](../../releases) の zip を展開すると、次の構成になります。
 
-やねうら王プロジェクトに支援すると、開発版のやねうら王(Windows x64/x86/ARM, macOS)、評価関数ファイル、最新定跡ファイルなどのダウンロードURLが書かれたニュースレターが受け取れます。これから支援される方には、過去のニュースレターも読めるFANBOXからの支援をお勧めしています。
+```
+p2shogi_v9/
+  p2shogi_v9.exe
+  eval/
+    nn.bin        本体の評価関数
+    opn.bin       序盤用の評価関数
+    kh.bin        玉周りの補助入力の表
+    progress.bin  進行度 (LayerStack の bucket 選択に使う)
+```
 
+将棋所や ShogiGUI などに `p2shogi_v9.exe` を登録してください。`eval` フォルダが exe と同じ場所にあれば、追加の設定は不要です。
 
-# やねうら王エンジンの大会での戦績
+- `Threads` の既定は 4、定跡は既定で使いません。
+- 動作には AVX2 対応の CPU が必要です。
 
-- 2026年 文部科学大臣杯第7回世界将棋AI電竜戦本戦 『水匠』優勝。(探索部やねうら王V9.90改)
-- 2026年 第7回電竜戦TSECノー相居飛車指定局面と先手持ち時間０戦
-  - 第1部『Ryfamate』優勝(NNUEとDL系の合議でNNUE探索部がやねうら王)
-  - 第2部『水匠』優勝(探索部やねうら王V9.60)
-- 2026年 第36回 世界コンピュータ将棋選手権(WCSC36)『水匠』4位。(探索部やねうら王V9.30改)
-- 2025年 文部科学大臣杯第6回世界将棋AI電竜戦本戦 『水匠Concerto』準優勝。(探索部やねうら王V9.10改。やねうらおはチームメンバーとして参加)
-- 2025年 第35回 世界コンピュータ将棋選手権(WCSC35)『水匠』優勝。(探索部やねうら王V8.60改)
-- 2025年 第3回世界将棋AI電竜戦ハードウェア統一戦 『水匠』優勝。(探索部やねうら王V8.60改)
-- 2024年 第34回 世界コンピュータ将棋選手権(WCSC34)『お前、CSA会員にならねーか？』優勝。(探索部やねうら王V8.20 GitHub版)
-- 2024年 第2回 マイナビニュース杯電竜戦ハードウェア統一戦 『水匠』準優勝 (探索部やねうら王V8.10開発版)
-- 2023年 第4回世界将棋AI電竜戦本戦 『水匠』優勝 (探索部やねうら王。やねうらおは、チームメンバーとして参加)
-- 2023年 第1回 マイナビニュース杯電竜戦ハードウェア統一戦 『水匠』優勝。(探索部やねうら王)
-- 2023年 第33回 世界コンピュータ将棋選手権(WCSC33)『やねうら王』準優勝。
-- 2023年 第4回世界将棋AI電竜戦TSEC4 ファイナル『やねうら王』相居飛車部門優勝。総合2位。
-- 2022年 第3回世界将棋AI電竜戦本戦 『水匠』優勝。(探索部やねうら王)
-- 2021年 第2回世界将棋AI電竜戦TSEC 『水匠』総合優勝。(探索部やねうら王)
-- 2020年 第1回 世界コンピュータ将棋オンライン大会(WCSO1) 『水匠』優勝。(探索部やねうら王)
-- 2019年 世界コンピュータ将棋選手権(WCSC29) 『やねうら王 with お多福ラボ2019』優勝。
-  - 決勝の上位8チームすべてがやねうら王の思考エンジンを採用。
-- 2018年 世界コンピュータ将棋選手権(WCSC28) 『Hefeweizen』優勝
-- 2017年 世界コンピュータ将棋選手権(WCSC27) 『elmo』優勝
-- 2017年 第5回将棋電王トーナメント(SDT5) 『平成将棋合戦ぽんぽこ』優勝
+## ビルド
 
-# やねうら王の特徴
+Windows + llvm-mingw (clang 23) で確認しています。
 
-- USIプロトコルに準拠した思考エンジンです。
-- 入玉宣言勝ち、トライルール等にも対応しています。
-- Ponder(相手番で思考する)、StochasticPonder(確率的ponder)に対応しています。
-- MultiPV(複数の候補手を出力する)に対応しています。
-- 秒読み、フィッシャールールなど様々な持時間に対応しています。
-- 256スレッドのような超並列探索に対応しています。
-- 定跡DBにやねうら王標準定跡フォーマットを採用しています。
-- 定跡DBのon the fly(メモリに丸読みしない)に対応しています。
-- 定跡DBの様々なメンテナンス用コマンドをサポートしています。
-- 置換表の上限サイズは33TB(実質的に無限)まで対応しています。
-- Windows、Ubuntu、macOS、ARMなど様々なプラットフォームをサポートしています。
-- 評価関数として、KPPT、KPP_KKPT、NNUE(各種)、SFNN(各種)に対応しています。
+```
+cd source
+make -j4 normal COMPILER="clang++ -static" YANEURAOU_EDITION=YANEURAOU_ENGINE_P2NNUE \
+  EXTRA_CPPFLAGS="(下の define)"
+```
 
-# ふかうら王の特徴
+公開版の exe は次の define で作り、100 万ノードの実戦局面 60 個で PGO をかけています。
 
-- dlshogi互換エンジンです。
-- やねうら王の思考エンジンオプションをサポートしています。
-- 定跡DBにやねうら王標準定跡フォーマットを採用しています。
-- 定跡DBのon the fly(メモリに丸読みしない)に対応しています。
-- GPU無しでも動作するDirectML版、TensorRT版を用意しています。
+```
+-DP2_ARCH_1024 -DP2_L1_MAIN=15 -DP2_THREAT_PROFILE=0 -DP2_MATE1PLY_NOEFFECT -DP2_THREAT_OUT=64
+-DUSE_LAZY_EVALUATE -DP2_THREAT_LZ -DP2_OPN -DP2_OPN_F2 -DP2_KH -DP2_OPN_R2 -DP2_LZ_IDXV2=1
+-DP2_LZ_ROWPF=1 -DP2_SRCH_BUNDLE_A -DP2_LZ_D1FAST -DP2_TR_STORE32 -DP2_ACC_PIECEWISE -DP2_FC0_PF
+-DP2_FT_KS=3 -DP2_FT_OUT16=5 -DP2_FT_SPARSE16 -DP2_FC1_PREC -DP2_BUCKET_OFFSET -DP2_OPTIMISM
+```
 
-# やねうら王の解説記事
+## 関連リポジトリ
 
-|記事内容|リンク|レベル|
-|-|-|-|
-|やねうら王のインストール手順について | [やねうら王のインストール手順](https://github.com/yaneurao/YaneuraOu/wiki/やねうら王のインストール手順)|入門|
-|ふかうら王のインストール手順について | [ふかうら王のインストール手順](https://github.com/yaneurao/YaneuraOu/wiki/ふかうら王のインストール手順)|中級|
-|やねうら王のお勧めエンジン設定について | [やねうら王のお勧めエンジン設定](https://github.com/yaneurao/YaneuraOu/wiki/やねうら王のお勧めエンジン設定)|入門|
-|ふかうら王のお勧めエンジン設定について | [ふかうら王のお勧めエンジン設定](https://github.com/yaneurao/YaneuraOu/wiki/ふかうら王のお勧めエンジン設定)|入門|
-|やねうら王/ふかうら王のエンジンオプションについて | [思考エンジンオプション](https://github.com/yaneurao/YaneuraOu/wiki/思考エンジンオプション)|入門~中級|
-|やねうら王詰将棋エンジンについて| [やねうら王詰将棋エンジン](https://github.com/yaneurao/YaneuraOu/wiki/やねうら王詰将棋エンジン)|入門~中級|
-|やねうら王のよくある質問|[よくある質問](https://github.com/yaneurao/YaneuraOu/wiki/よくある質問)|初級~中級|
-|やねうら王のソースコードのルールについて|[CONTRIBUTING.md](.github/CONTRIBUTING.md)|開発者向け|
-|やねうら王の隠し機能 | [隠し機能](https://github.com/yaneurao/YaneuraOu/wiki/隠し機能)|中級~上級|
-|やねうら王の定跡を作る | [定跡の作成](https://github.com/yaneurao/YaneuraOu/wiki/定跡の作成)|中級~上級|
-|やねうら王のUSI拡張コマンドについて | [USI拡張コマンド](https://github.com/yaneurao/YaneuraOu/wiki/USI拡張コマンド)|開発者向け|
-|やねうら王のビルド手順について | [やねうら王のビルド手順](https://github.com/yaneurao/YaneuraOu/wiki/やねうら王のビルド手順)|開発者向け|
-|ふかうら王のビルド手順について | [ふかうら王のビルド手順](https://github.com/yaneurao/YaneuraOu/wiki/ふかうら王のビルド手順)|開発者向け|
-|やねうら王のソースコード解説 |[やねうら王のソースコード解説](https://github.com/yaneurao/YaneuraOu/wiki/やねうら王のソースコード解説)|開発者向け|
-|AWSでやねうら王を動かす| [AWSでやねうら王](https://github.com/yaneurao/YaneuraOu/wiki/AWSでやねうら王)|中級~開発者|
-|大会に参加する時の設定|[大会に参加する時の設定](https://github.com/yaneurao/YaneuraOu/wiki/大会に参加する時の設定)|開発者|
-|評価関数の学習|[評価関数の学習](https://github.com/yaneurao/YaneuraOu/wiki/評価関数の学習)|開発者|
-|ふかうら王の学習|[ふかうら王の学習](https://github.com/yaneurao/YaneuraOu/wiki/ふかうら王の学習)|開発者|
-|USI対応エンジンの自己対局|[USI対応エンジンの自己対局](https://github.com/yaneurao/YaneuraOu/wiki/USI対応エンジンの自己対局)|中級～開発者|
-|パラメーター自動調整フレームワーク|[パラメーター自動調整フレームワーク](https://github.com/yaneurao/YaneuraOu/wiki/パラメーター自動調整フレームワーク)|開発者|
-|探索部の計測資料|[探索部の計測資料](https://github.com/yaneurao/YaneuraOu/wiki/探索部の計測資料)|開発者|
-|廃止したコマンド・オプションなど| [過去の資料](https://github.com/yaneurao/YaneuraOu/wiki/過去の資料)|開発者|
-|過去のサブプロジェクト|[過去のサブプロジェクト](https://github.com/yaneurao/YaneuraOu/wiki/%E9%81%8E%E5%8E%BB%E3%81%AE%E3%82%B5%E3%83%96%E3%83%97%E3%83%AD%E3%82%B8%E3%82%A7%E3%82%AF%E3%83%88)|初心者～開発者|
-|やねうら王の更新履歴|[やねうら王の更新履歴](https://github.com/yaneurao/YaneuraOu/wiki/やねうら王の更新履歴)|開発者|
+- 学習器: [pekoshi/bullet-shogi](https://github.com/pekoshi/bullet-shogi) の `p2shogi` ブランチ (nodchip 氏の bullet-shogi の fork)
+- 学習器が使う `rshogi-core`: [pekoshi/rshogi](https://github.com/pekoshi/rshogi) (ラム将棋 SH11235/rshogi の fork)
 
+## ライセンス
 
-# やねうら王ニュース記事一覧
+GPLv3 です (`LICENSE`)。やねうら王 (GPLv3) の派生物です。
 
-やねうら王公式ブログの関連記事の見出し一覧です。
+## 謝辞
 
-各エンジンオプションの解説、定跡ファイルのダウンロード、定跡の生成手法などについての詳しい資料があります。初心者から開発者まで、知りたいことが全部詰まっています。
+- やねうら王 (yaneurao 氏) と、その元になった Stockfish
+- 進行度ファイル `progress.bin` は NAGISA v3.1 に同梱のものです
+- 学習データ: DL 水匠の評価で付け直した公開データ (dlsuisho-ponkotsu-distilled)
+- 学習器: bullet-shogi (nodchip 氏)
+- ラム将棋 (SH11235 氏)
 
-- [やねうら王ニュース記事一覧](https://github.com/yaneurao/YaneuraOu/wiki/%E3%82%84%E3%81%AD%E3%81%86%E3%82%89%E7%8E%8B%E3%83%8B%E3%83%A5%E3%83%BC%E3%82%B9)
-
-# ライセンス
-
-やねうら王プロジェクトのソースコードはStockfishをそのまま用いている部分が多々あり、Apery/SilentMajorityを参考にしている部分もありますので、やねうら王プロジェクトは、それらのプロジェクトのライセンス(GPLv3)に従うものとします。
-
-「リゼロ評価関数ファイル」については、やねうら王プロジェクトのオリジナルですが、一切の権利は主張しませんのでご自由にお使いください。
-
-# やねうら王プロジェクト関連リンク
-
-やねうら王関連の最新情報がキャッチできる主要なサイトです。
-
-|サイト | リンク| 内容 |
-|-----|-----|-----|
-|やねうら王公式GitHub | https://github.com/yaneurao/YaneuraOu | このリポジトリ |
-|やねうら王公式ブログ | https://yaneuraou.yaneu.com | やねうら王ブログ |
-|BulletOu | https://github.com/yaneurao/BulletOu | 評価関数の高速学習器 |
-|やねうら王ScriptCollection | https://github.com/yaneurao/YaneuraOu-ScriptCollection | やねうら王スクリプト集 |
-|やねうら王 X | https://x.com/yaneuraou| やねうら王のX |
-|やねうら王ちゃんねる(YouTube) | https://www.youtube.com/c/yanechan| YouTube動画 |
-|やねうら王mini | http://yaneuraou.yaneu.com/YaneuraOu_Mini | やねうら王miniを作ってみる連載記事 |
-
-上記のやねうら王公式ブログでは、コンピュータ将棋に関する情報を大量に発信していますので、やねうら王に興味がなくとも、コンピュータ将棋の開発をしたいなら、非常に参考になると思います。
-
-# 姉妹プロジェクト
-
-<p>
-<a href="https://github.com/yaneurao/BulletOu"><img src="https://github.com/yaneurao/BulletOu/raw/shogi-support/docs/images/BulletOu-banner-600x200.jpg" alt="BulletOu" width="300" height="100"></a>&emsp;
-<a href="https://github.com/yaneurao/ShogiMultiAgent"><img src="https://github.com/yaneurao/ShogiMultiAgent/raw/main/docs/images/ShogiMultiAgent-banner600x200.jpg" alt="ShogiMultiAgent" width="300" height="100"></a>
-</p>
-
-[BulletOu](https://github.com/yaneurao/BulletOu) - GPUを用いたやねうら王評価関数の高速学習器<br/>
-[ShogiMultiAgent](https://github.com/yaneurao/ShogiMultiAgent) - 将棋AIの対局サーバーに複数のエンジンを同時接続
-
-
-
-# 質問箱
-
-やねうら王関連の質問は、以下のブログ記事のコメント欄にお願いします。
-https://yaneuraou.yaneu.com/2022/05/19/yaneuraou-question-box/
-
+元のやねうら王の README は `README_YaneuraOu.md` にあります。

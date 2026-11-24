@@ -4,13 +4,9 @@
 #ifndef CLASSIC_NNUE_LAYERS_CLIPPED_RELU_H_INCLUDED
 #define CLASSIC_NNUE_LAYERS_CLIPPED_RELU_H_INCLUDED
 
-#include <algorithm>
-#include <cstdint>
-
 #include "../../../config.h"
-#include "../../../extra/tools.h"
 
-#if (defined(EVAL_NNUE) || defined(EVAL_SFNN))
+#if defined(EVAL_NNUE)
 
 #include "../nnue_common.h"
 
@@ -24,37 +20,35 @@ class ClippedReLU {
   // Input/output type
   // 入出力の型
   using InputType = typename PreviousLayer::OutputType;
-  using OutputType = u8;
-  static_assert(std::is_same<InputType, i32>::value, "");
+  using OutputType = std::uint8_t;
+  static_assert(std::is_same<InputType, std::int32_t>::value, "");
 
   // Number of input/output dimensions
   // 入出力の次元数
   static constexpr IndexType kInputDimensions =
       PreviousLayer::kOutputDimensions;
   static constexpr IndexType kOutputDimensions = kInputDimensions;
-  static constexpr IndexType kPaddedOutputDimensions =
-      CeilToMultiple<IndexType>(kOutputDimensions, kMaxSimdWidth);
 
   // Size of forward propagation buffer used in this layer
   // この層で使用する順伝播用バッファのサイズ
-  static constexpr usize kSelfBufferSize =
+  static constexpr std::size_t kSelfBufferSize =
       CeilToMultiple(kOutputDimensions * sizeof(OutputType), kCacheLineSize);
 
   // Size of the forward propagation buffer used from the input layer to this layer
   // 入力層からこの層までで使用する順伝播用バッファのサイズ
-  static constexpr usize kBufferSize =
+  static constexpr std::size_t kBufferSize =
       PreviousLayer::kBufferSize + kSelfBufferSize;
 
   // Hash value embedded in the evaluation file
   // 評価関数ファイルに埋め込むハッシュ値
-  static constexpr u32 GetHashValue() {
-    u32 hash_value = 0x538D24C7u;
+  static constexpr std::uint32_t GetHashValue() {
+    std::uint32_t hash_value = 0x538D24C7u;
     hash_value += PreviousLayer::GetHashValue();
     return hash_value;
   }
 
   // ハッシュ値を前段の値から更新するときのヘルパー
-  static constexpr u32 GetHashValue(u32 prevHash) {
+  static constexpr std::uint32_t GetHashValue(std::uint32_t prevHash) {
     return 0x538D24C7u + prevHash;
   }
 
@@ -210,9 +204,6 @@ class ClippedReLU {
       output[i] = static_cast<OutputType>(
           std::max(0, std::min(127, input[i] >> kWeightScaleBits)));
     }
-    if constexpr (kPaddedOutputDimensions > kOutputDimensions) {
-      std::fill(output + kOutputDimensions, output + kPaddedOutputDimensions, OutputType{0});
-    }
     return output;
   }
 
@@ -224,6 +215,6 @@ class ClippedReLU {
 } // namespace Eval::NNUE::Layers
 } // namespace YaneuraOu
 
-#endif  // (defined(EVAL_NNUE) || defined(EVAL_SFNN))
+#endif  // defined(EVAL_NNUE)
 
 #endif // NNUE_LAYERS_CLIPPED_RELU_H_INCLUDED

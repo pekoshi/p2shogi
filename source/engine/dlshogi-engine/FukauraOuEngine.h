@@ -1,5 +1,5 @@
-﻿#ifndef FUKAURAOU_ENGINE_H_INCLUDED
-#define FUKAURAOU_ENGINE_H_INCLUDED
+﻿#ifndef __FUKAURAOU_ENGINE_H_INCLUDED__
+#define __FUKAURAOU_ENGINE_H_INCLUDED__
 #include "../../config.h"
 
 #if defined(YANEURAOU_ENGINE_DEEP)
@@ -89,4 +89,4 @@ class FukauraOuEngine: public YaneuraOu::Engine {
 
 #endif // defined(YANEURAOU_ENGINE_DEEP)
 
-#endif // ndef FUKAURAOU_ENGINE_H_INCLUDED
+#endif // ndef __FUKAURAOU_ENGINE_H_INCLUDED__

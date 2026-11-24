@@ -5,9 +5,8 @@
 #define NNUE_LAYERS_SQR_CLIPPED_RELU_H_INCLUDED
 
 #include "../../../config.h"
-#include "../../../extra/tools.h"
 
-#if (defined(EVAL_NNUE) || defined(EVAL_SFNN))
+#if defined(EVAL_NNUE)
 
 #include "../nnue_common.h"
 #include <algorithm>
@@ -22,8 +21,8 @@ namespace Eval::NNUE::Layers {
 	public:
 		// Input/output type
 		// 入出力の型
-		using InputType = i32;
-		using OutputType = u8;
+		using InputType = std::int32_t;
+		using OutputType = std::uint8_t;
 
 		// Number of input/output dimensions
 		// 入出力の次元数
@@ -36,8 +35,8 @@ namespace Eval::NNUE::Layers {
 
 		// Hash value embedded in the evaluation file
 		// 評価関数ファイルに埋め込むハッシュ値
-		static constexpr u32 GetHashValue(u32 prevHash) {
-			u32 hash_value = 0x538D24C7u;
+		static constexpr std::uint32_t GetHashValue(std::uint32_t prevHash) {
+			std::uint32_t hash_value = 0x538D24C7u;
 			hash_value += prevHash;
 			return hash_value;
 		}
@@ -93,86 +92,6 @@ namespace Eval::NNUE::Layers {
 				output[i] = static_cast<OutputType>(
 					std::min(127ll, ((long long)(input[i]) * input[i]) >> (2 * kWeightScaleBits + 7)));
 			}
-			if constexpr (PaddedOutputDimensions > kOutputDimensions) {
-				std::fill(output + kOutputDimensions, output + PaddedOutputDimensions, OutputType{0});
-			}
-		}
-
-		// SqrClippedReLUとClippedReLUをまとめて計算する。
-		// SFNNの後段入力は [sqr(input[0..n-2]), clip(input[0..n-2])] という連結なので、
-		// 1回の入力変換から両方の出力を作る。
-		void PropagatePair(const InputType* input, OutputType* sqrOut, OutputType* clipOut) const {
-			static_assert(kWeightScaleBits == 6);
-			[[maybe_unused]] constexpr int SimdShiftAmount = 2 * kWeightScaleBits + 7 - 16;
-
-#if defined(USE_AVX512)
-			if constexpr (kInputDimensions == 16)
-			{
-				const __m512i x = _mm512_load_si512(reinterpret_cast<const __m512i*>(input));
-				const __m256i w = _mm512_cvtsepi32_epi16(x);
-
-				const __m256i sq = _mm256_srli_epi16(_mm256_mulhi_epi16(w, w), SimdShiftAmount);
-				_mm_storeu_si128(reinterpret_cast<__m128i*>(sqrOut), _mm256_cvtsepi16_epi8(sq));
-
-				const __m256i cl = _mm256_srli_epi16(
-					_mm256_max_epi16(w, _mm256_setzero_si256()), kWeightScaleBits);
-				_mm_storeu_si128(reinterpret_cast<__m128i*>(clipOut), _mm256_cvtsepi16_epi8(cl));
-				return;
-			}
-#endif
-#if defined(USE_AVX2)
-			if constexpr (kInputDimensions == 16)
-			{
-				const auto in = reinterpret_cast<const __m256i*>(input);
-				__m256i w = _mm256_packs_epi32(_mm256_load_si256(&in[0]), _mm256_load_si256(&in[1]));
-				w         = _mm256_permute4x64_epi64(w, 0b11011000);
-
-				const __m256i sq = _mm256_srli_epi16(_mm256_mulhi_epi16(w, w), SimdShiftAmount);
-				_mm_storeu_si128(reinterpret_cast<__m128i*>(sqrOut),
-				                 _mm_packs_epi16(_mm256_castsi256_si128(sq),
-				                                 _mm256_extracti128_si256(sq, 1)));
-
-				const __m256i cl = _mm256_srli_epi16(
-					_mm256_max_epi16(w, _mm256_setzero_si256()), kWeightScaleBits);
-				_mm_storeu_si128(reinterpret_cast<__m128i*>(clipOut),
-				                 _mm_packs_epi16(_mm256_castsi256_si128(cl),
-				                                 _mm256_extracti128_si256(cl, 1)));
-				return;
-			}
-#endif
-#if defined(USE_SSE2)
-			if constexpr (kInputDimensions % 8 == 0)
-			{
-				constexpr IndexType NumChunks = kInputDimensions / 8;
-				const auto in = reinterpret_cast<const __m128i*>(input);
-
-				// 出力領域は重なりうるので、sqr側をすべて書いてからclip側を書く。
-				for (IndexType i = 0; i < NumChunks; ++i)
-				{
-					const __m128i w = _mm_packs_epi32(_mm_load_si128(&in[i * 2 + 0]),
-					                                  _mm_load_si128(&in[i * 2 + 1]));
-					const __m128i sq = _mm_srli_epi16(_mm_mulhi_epi16(w, w), SimdShiftAmount);
-					_mm_storel_epi64(reinterpret_cast<__m128i*>(sqrOut + i * 8),
-					                 _mm_packs_epi16(sq, sq));
-				}
-				for (IndexType i = 0; i < NumChunks; ++i)
-				{
-					const __m128i w = _mm_packs_epi32(_mm_load_si128(&in[i * 2 + 0]),
-					                                  _mm_load_si128(&in[i * 2 + 1]));
-					const __m128i cl = _mm_srli_epi16(_mm_max_epi16(w, _mm_setzero_si128()),
-					                                  kWeightScaleBits);
-					_mm_storel_epi64(reinterpret_cast<__m128i*>(clipOut + i * 8),
-					                 _mm_packs_epi16(cl, cl));
-				}
-				return;
-			}
-#endif
-			for (IndexType i = 0; i < kInputDimensions; ++i)
-				sqrOut[i] = static_cast<OutputType>(
-					std::min(127ll, ((long long)(input[i]) * input[i]) >> (2 * kWeightScaleBits + 7)));
-			for (IndexType i = 0; i < kInputDimensions; ++i)
-				clipOut[i] = static_cast<OutputType>(
-					std::max(0, std::min(127, input[i] >> kWeightScaleBits)));
 		}
 
 	};
@@ -180,6 +99,6 @@ namespace Eval::NNUE::Layers {
 }  // namespace Eval::NNUE::Layers
 }  // namespace YaneuraOu
 
-#endif  // (defined(EVAL_NNUE) || defined(EVAL_SFNN))
+#endif  // defined(EVAL_NNUE)
 
 #endif // NNUE_LAYERS_SQR_CLIPPED_RELU_H_INCLUDED

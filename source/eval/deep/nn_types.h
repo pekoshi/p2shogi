@@ -1,5 +1,5 @@
-﻿#ifndef DLSHOGI_EVALUATE_H_INCLUDED
-#define DLSHOGI_EVALUATE_H_INCLUDED
+﻿#ifndef __DLSHOGI_EVALUATE_H_INCLUDED__
+#define __DLSHOGI_EVALUATE_H_INCLUDED__
 
 #include "../../config.h"
 #if defined(YANEURAOU_ENGINE_DEEP)
@@ -228,4 +228,4 @@ namespace Eval::dlshogi {
 } // namespace YaneuraOu
 
 #endif // defined(YANEURAOU_ENGINE_DEEP)
-#endif // ndef DLSHOGI_EVALUATE_H_INCLUDED
+#endif // ndef __DLSHOGI_EVALUATE_H_INCLUDED__

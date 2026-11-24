@@ -2,7 +2,7 @@
 
 #include "../../../config.h"
 
-#if (defined(EVAL_NNUE) || defined(EVAL_SFNN)) && defined(LONG_EFFECT_LIBRARY) && defined(USE_BOARD_EFFECT_PREV)
+#if defined(EVAL_NNUE) && defined(LONG_EFFECT_LIBRARY) && defined(USE_BOARD_EFFECT_PREV)
 
 #include "half_kpe9.h"
 #include "index_list.h"
@@ -95,10 +95,11 @@ void HalfKPE9<AssociatedKing>::AppendActiveIndices(
 template <Side AssociatedKing>
 void HalfKPE9<AssociatedKing>::AppendChangedIndices(
     const Position& pos, Color perspective,
-    IndexList* removed, IndexList* added, const Eval::DirtyPiece& dp) {
+    IndexList* removed, IndexList* added) {
   BonaPiece* pieces;
   Square sq_target_k;
   GetPieces(pos, perspective, &pieces, &sq_target_k);
+  const auto& dp = pos.state()->dirtyPiece;
 
   for (int i = 0; i < dp.dirty_num; ++i) {
     if (dp.pieceNo[i] >= PIECE_NUMBER_KING) continue;
@@ -145,4 +146,4 @@ template class HalfKPE9<Side::kEnemy>;
 } // namespace Eval::NNUE::Features
 } // namespace YaneuraOu
 
-#endif  // (defined(EVAL_NNUE) || defined(EVAL_SFNN))
+#endif  // defined(EVAL_NNUE)

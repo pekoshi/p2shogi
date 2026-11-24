@@ -1,5 +1,4 @@
 ﻿#include "../../config.h"
-#include "../../extra/tools.h"
 #if defined(TANUKI_MATE_ENGINE)
 
 #include <unordered_set>
@@ -79,11 +78,18 @@ struct MovePicker
 	// or_node == trueなら攻め方の手番である。王手となる指し手をすべて生成する。
 	// or_node == falseなら受け方の手番である。王手回避の指し手だけをすべて生成する。
 	MovePicker(Position& pos, bool or_node) {
-		// 攻め方は王手、受け方は王手回避の候補を生成する。
-		if (or_node)
-			generate_legal<CHECKS_ALL>(pos);
-		else
-			generate_legal<EVASIONS_ALL>(pos);
+		// たぬき詰めであれば段階的に指し手を生成する必要はない。
+		// 自分の手番なら王手の指し手(CHECKS)、
+		// 相手の手番ならば回避手(EVASIONS)を生成。
+		endMoves = or_node ?
+			generateMoves<CHECKS_ALL>(pos, moves) :
+			generateMoves<EVASIONS_ALL>(pos, moves);
+
+		// 非合法手が交じるとempty()でそのnodeが詰みかどうかが判定できなくなりややこしいので、
+		// ここで除外しておく。
+		endMoves = std::remove_if(moves, endMoves, [&pos](const auto& move) {
+			return !pos.legal(move);
+		});
 	}
 
 	// 生成された指し手が空であるかの判定
@@ -91,20 +97,13 @@ struct MovePicker
 		return moves == endMoves;
 	}
 
-	const Move* begin() const { return moves; }
-	const Move* end() const { return endMoves; }
+	ExtMove* begin() { return moves; }
+	ExtMove* end() { return endMoves; }
+	const ExtMove* begin() const { return moves; }
+	const ExtMove* end() const { return endMoves; }
 
 private:
-	template<GenType Type>
-	void generate_legal(const Position& pos)
-	{
-		// empty() で詰みを判定できるよう、合法手だけを格納する。
-		for (Move move : MoveList<Type>(pos))
-			if (pos.legal(move))
-				*endMoves++ = move;
-	}
-
-	Move moves[MAX_MOVES], *endMoves = moves;
+	ExtMove moves[MAX_MOVES], *endMoves = moves;
 };
 
 // 置換表
@@ -178,7 +177,7 @@ struct TranspositionTable {
 	}
 
 	// 指定したKeyのTTEntryを返す。見つからなければ初期化された新規のTTEntryを返す。
-	TTEntry& LookUp(HASH_KEY key, Color root_color) {
+	TTEntry& LookUp(Key key, Color root_color) {
 		auto& entries = tt[key & clusters_mask];
 		uint32_t hash_high = ((key >> 32) & ~1) | root_color;
 
@@ -315,12 +314,10 @@ public:
 	ThreadPool& threads;
 	OptionsMap& options;
 	Search::LimitsType* limits_ptr;
-    RelaxedAtomic<u64>* node_counter;
 
-	void set_limits(Search::LimitsType& limits, RelaxedAtomic<u64>& nodes)
+	void set_limits(Search::LimitsType& limits)
 	{
 		this->limits_ptr = &limits;
-        node_counter = &nodes;
 	}
 
 	// 詰将棋探索のエントリポイント
@@ -350,11 +347,11 @@ public:
 
 		std::vector<Move> moves;
 		if (options[kMorePreciseMatePv]) {
-			std::unordered_map<HASH_KEY, MateState> memo;
+			std::unordered_map<Key, MateState> memo;
 			SearchMatePvMorePrecise(true, root_color, r, memo);
 
 			// 探索メモから詰み手順を再構築する
-
+			StateInfo state_info[2048] = {};
 			bool found = false;
 			for (int play = 0; ; ++play) {
 				const auto& mate_state = memo[r.key()];
@@ -367,7 +364,7 @@ public:
 				}
 
 				moves.push_back(mate_state.move_to_mate);
-				r.do_move(mate_state.move_to_mate);
+				r.do_move(mate_state.move_to_mate, state_info[play]);
 			}
 
 			// 局面をもとに戻す
@@ -381,7 +378,7 @@ public:
 			}
 		}
 		else {
-			std::unordered_set<HASH_KEY> visited;
+			std::unordered_set<Key> visited;
 			SearchMatePvFast(true, root_color, r, moves, visited);
 		}
 
@@ -475,10 +472,6 @@ public:
 			threads.stop = true;
 			return;
 		}
-
-        // Position::do_move()はノード数を加算しないため、DFPNの訪問時に自分で数える。
-        // 根局面も1ノードとし、上限到達による打ち切りでは加算しない。
-        ++*node_counter;
 
 		auto& entry = transposition_table.LookUp(n, root_color);
 
@@ -747,8 +740,8 @@ public:
 				entry.dn = 0;
 				return;
 			}
-
-			n.do_move(best_move);
+			StateInfo state_info;
+			n.do_move(best_move, state_info);
 			DFPNwithTCA(n, thpn_child, thdn_child, inc_flag, !or_node, depth + 1, root_color,
 				start_time, timeup);
 			n.undo_move(best_move);
@@ -763,9 +756,9 @@ public:
 		cout << "key-gen" << entry0.hash_high << "," << entry0.generation << endl;
 
 		for (auto m : pv_check) {
-
+			StateInfo state_info;
 			Move move = pos.to_move(m);
-			pos.do_move(move);
+			pos.do_move(move, state_info);
 			const auto& entry = transposition_table.LookUp(pos, root_color);
 			cout << pos << endl;
 			cout << "pn,dn = " << entry.pn << "," << entry.dn << endl;
@@ -802,7 +795,7 @@ public:
 
 	// 詰み手順を1つ返す
 	// 最短の詰み手順である保証はない
-	bool SearchMatePvFast(bool or_node, Color root_color, Position& pos, std::vector<Move>& moves, std::unordered_set<HASH_KEY>& visited) {
+	bool SearchMatePvFast(bool or_node, Color root_color, Position& pos, std::vector<Move>& moves, std::unordered_set<Key>& visited) {
 		// 一度探索したノードを探索しない
 		if (visited.find(pos.key()) != visited.end()) {
 			return false;
@@ -835,7 +828,8 @@ public:
 				continue;
 			}
 
-			pos.do_move(move);
+			StateInfo state_info;
+			pos.do_move(move, state_info);
 			moves.push_back(move);
 			if (SearchMatePvFast(!or_node, root_color, pos, moves, visited)) {
 				pos.undo_move(move);
@@ -870,7 +864,7 @@ public:
 	// pos 盤面
 	// memo 過去に探索した盤面のキーと探索状況のmap
 	// return 詰みまでの手数、詰みの局面は0、ループがある場合はkLoop、不詰みの場合はkNotMated
-	int SearchMatePvMorePrecise(bool or_node, Color root_color, Position& pos, std::unordered_map<HASH_KEY, MateState>& memo) {
+	int SearchMatePvMorePrecise(bool or_node, Color root_color, Position& pos, std::unordered_map<Key, MateState>& memo) {
 		// 過去にこのノードを探索していないか調べる
 		auto key = pos.key();
 		if (memo.find(key) != memo.end()) {
@@ -894,8 +888,8 @@ public:
 			mate_state.move_to_mate = mate1ply;
 
 			// 詰みの局面をメモしておく
-
-			pos.do_move(mate1ply);
+			StateInfo state_info = {};
+			pos.do_move(mate1ply, state_info);
 			auto& mate_state_mated = memo[pos.key()];
 			mate_state_mated.num_moves_to_mate = 0;
 			pos.undo_move(mate1ply);
@@ -928,7 +922,8 @@ public:
 				continue;
 			}
 
-			pos.do_move(move);
+			StateInfo state_info;
+			pos.do_move(move, state_info);
 			int num_moves_to_mate_candidate = SearchMatePvMorePrecise(!or_node, root_color, pos, memo);
 			pos.undo_move(move);
 
@@ -1001,7 +996,7 @@ public:
 	//     そのあと非メインスレッドに対してstart_searching()を呼び出すのは、threads.start_searching()を呼び出すと良い。
 	virtual void start_searching() override
 	{
-		mateClass.set_limits(limits, nodes);
+		mateClass.set_limits(limits);
 
 		if (pv_check.size() != 0) {
 			mateClass.pv_check_from_table(rootPos, pv_check);
@@ -1099,7 +1094,7 @@ public:
 			return LargePagePtr<Worker>(p.release());  // Worker* に upcast
 		};
 
-        threads.set(numaContext.get_numa_config(), {options, threads, tt, sharedHists, network},
+        threads.set(numaContext.get_numa_config(), {options, threads, tt, sharedHists /*, networks*/ },
 					updateContext, options["Threads"], worker_factory);
 
 		// 📌 NUMAの設定
@@ -1141,14 +1136,8 @@ namespace {
 		usi->set_engine(*engine);  // エンジン実装を差し替える。
 		usi->enqueue_startup_commands(CommandLine::g);
 
-#if defined(__EMSCRIPTEN__)
-		// 🌈 wasmではloop()が即座にreturnするので、インスタンスを保持したうえでJS側に制御を返す。
-		//     以後のコマンドはusi_command()経由で実行される。
-		wasm_keep_alive(std::move(engine), std::move(usi));
-#else
 		// USIコマンドの応答のためのループ
 		usi->loop();
-#endif
 	}
 
 	// このentry pointを登録しておく。

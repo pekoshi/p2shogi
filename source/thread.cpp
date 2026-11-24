@@ -1,30 +1,17 @@
-﻿#include "thread.h"
-
-#include <algorithm> // std::count
-#include <cassert>
+﻿#include <algorithm> // std::count
 #include <cmath>     // std::abs
-#include <cstdlib>
-#include <iostream>
 #include <map>
 #include <memory>
-#include <string>
 #include <unordered_map>
-#include <unordered_set>
-#include <utility>
 
-#include "bitboard.h"
 #include "history.h"
-#include "memory.h"
-#include "movegen.h"
-#include "position.h"
-#include "search.h"
-#if STOCKFISH
-#include "syzygy/tbprobe.h"
-#endif
-#include "timeman.h"
-#include "types.h"
+#include "thread.h"
+#include "spsa_params.h"   // SPSA::NALLOC_* (2026-09-28)
+#include "p2volm.h"        // P2Volm::value / bin (2026-09-28)
 #include "usi.h"
-#include "usioption.h"
+#include "book/bookaware.h"   // 🎯BookAware (定跡反映型探索、 2026-09-25)
+#include "tt.h"
+#include "movegen.h"
 
 namespace YaneuraOu {
 
@@ -36,82 +23,58 @@ namespace YaneuraOu {
 // 'searching' および 'exit' は、すでに設定されている必要がある点に注意してください。
 
 Thread::Thread(Search::SharedState& sharedState,
-#if STOCKFISH
-               std::unique_ptr<Search::SearchManager> sm,
-#else
+               //std::unique_ptr<Search::ISearchManager> sm,
                Search::WorkerFactory          worker_factory,
-#endif
-               usize                         n,               // threadIdx
-               usize                         numaN,           // numaThreadIdx
-               usize                         totalNumaCount,  // numaTotal
+               size_t                         n,               // threadIdx
+               size_t                         numaN,           // numaThreadIdx
+               size_t                         totalNumaCount,  // numaTotal
                OptionalThreadToNumaNodeBinder binder) :
     idx(n),
     idxInNuma(numaN),
     totalNuma(totalNumaCount),
-    stdThread(
-      create_native_thread(NativeThreadOptions{}.setLargeStack(true), &Thread::idle_loop, this)) {
+    //nthreads(sharedState.options["Threads"]),
+    stdThread(&Thread::idle_loop, this) {
 
-    if (!stdThread.joinable())
-    {
-        std::cerr << "Failed to create search thread\n";
-        std::exit(EXIT_FAILURE);
-    }
-
-#if STOCKFISH
-    wait_for_search_finished();
-
-    run_custom_job([this, &binder, &sharedState, &sm, n]() {
-        // Use the binder to [maybe] bind the threads to a NUMA node before doing
-        // the Worker allocation. Ideally we would also allocate the SearchManager
-        // here, but that's minor.
-        // Workerのメモリを確保する前に、必要ならbinderでスレッドをNUMAノードへ固定する。
-        // 理想的にはSearchManagerもここで確保したいが、その影響は小さい。
-        this->numaAccessToken = binder();
-        this->worker          = make_unique_large_page<Search::Worker>(
-          sharedState, std::move(sm), n, idxInNuma, totalNuma, this->numaAccessToken);
-    });
-
-    wait_for_search_finished();
-#else
 #if !defined(__EMSCRIPTEN__)
 
-    // スレッドはsearching == trueで開始するので、idle_loop()で待機状態になるまで待つ。
-    wait_for_search_finished();
-
-    run_custom_job([this, &binder, &sharedState, n, worker_factory]() {
-        // Use the binder to [maybe] bind the threads to a NUMA node before doing
+#if STOCKFISH
+	run_custom_job([this, &binder, &sharedState /*, &sm*/, n]() {
+#else
+	run_custom_job([this, &binder, &sharedState , n , worker_factory]() {
+#endif
+		// Use the binder to [maybe] bind the threads to a NUMA node before doing
         // the Worker allocation. Ideally we would also allocate the SearchManager
         // here, but that's minor.
-        // Workerのメモリを確保する前に、必要ならbinderでスレッドをNUMAノードへ固定する。
-        // 理想的にはSearchManagerもここで確保したいが、その影響は小さい。
+
+        // スレッドを Worker 割り当ての前に NUMA ノードに（必要なら）バインドするために binder を使う。
+        // 理想的にはここで SearchManager も割り当てたいが、それは些細なことだ。
 
         this->numaAccessToken = binder();
+#if STOCKFISH
+        this->worker = make_unique_large_page<Search::Worker>(
+          sharedState, std::move(sm), n, idxInNuma, totalNuma, this->numaAccessToken);
+#else
 		// 🌈 やねうら王では、ここでworker_factoryを使ってWorker派生classを生成する。
 		this->worker = std::move(worker_factory(sharedState,
 												{n, idxInNuma, totalNuma, this->numaAccessToken}));
+#endif
     });
 
-    // Workerを生成するジョブが完了するまで待つ。
+    // スレッドはsearching == trueで開始するので、このままworkerのほう待機状態にさせておく
     wait_for_search_finished();
 
 #else
     // yaneuraou.wasm
-    // wait_for_search_finished すると、ブラウザのメインスレッドをブロックしデッドロックが発生するため、待機しない。
+    // wait_for_search_finished すると、ブラウザのメインスレッドをブロックしデッドロックが発生するため、コメントアウト。
     //
     // 新しいスレッドが cv を設定するのを待ってから、ブラウザに処理をパスしたいが、
     // 新しいスレッド用のworkerを作成するためには、いったんブラウザに処理をパスする必要がある。
     //
     // https://bugzilla.mozilla.org/show_bug.cgi?id=1049079
     //
-    // 📝 同じ理由でrun_custom_job()の完了も待てないため、workerは生成スレッド上で直接生成する。
-    //     run_custom_job()に任せると、ジョブが実行される前にThread::clear_worker()が
-    //     worker == nullptrのまま呼ばれうる。
-    //     run_custom_job()を経由する目的はNUMAノードにbindしたスレッド上で
-    //     workerのメモリを確保することだが、wasmにNUMAは無い。
-    this->numaAccessToken = binder();
-    this->worker          = std::move(
-      worker_factory(sharedState, {n, idxInNuma, totalNuma, this->numaAccessToken}));
-#endif // !defined(__EMSCRIPTEN__)
+    // threadStarted という変数を設けて全てのスレッドが開始するまでリトライするようにする
+    //
+    // 参考：https://github.com/lichess-org/stockfish.wasm/blob/a022fa1405458d1bc1ba22fe813bace961859102/src/thread.cpp#L38
 #endif
 }
 
@@ -125,7 +88,7 @@ Thread::Thread(Search::SharedState& sharedState,
 Thread::~Thread() {
 
     // 探索中にスレッドオブジェクトが解体されることはない。
-    assert(!searching);
+    ASSERT_LV3(!searching);
 
     // 探索は終わっているのでexitフラグをセットしてstart_searching()を呼べば終了するはず。
     exit = true;
@@ -185,7 +148,7 @@ void Thread::idle_loop() {
         std::unique_lock<std::mutex> lk(mutex);
         searching = false;
         cv.notify_one();  // Wake up anyone waiting for search finished
-                          // 探索の完了を待っているスレッドを1つ起こします
+                          // 探索の完了を待っているすべてのスレッドを起こします
 
         cv.wait(lk, [&] { return searching; });
 
@@ -203,17 +166,12 @@ void Thread::idle_loop() {
 }
 
 
-#if STOCKFISH
-Search::SearchManager* ThreadPool::main_manager() { return main_thread()->worker->main_manager(); }
-#endif
+//Search::SearchManager* ThreadPool::main_manager() { return main_thread()->worker->main_manager(); }
 
-u64 ThreadPool::nodes_searched() const { return accumulate(&Search::Worker::nodes); }
+uint64_t ThreadPool::nodes_searched() const { return accumulate(&Search::Worker::nodes); }
+//uint64_t ThreadPool::tb_hits() const { return accumulate(&Search::Worker::tbHits); }
 
-#if STOCKFISH
-u64 ThreadPool::tb_hits() const { return accumulate(&Search::Worker::tbHits); }
-#endif
-
-static usize next_power_of_two(u64 count) { return count > 1 ? (2ULL << msb(count - 1)) : 1; }
+static size_t next_power_of_two(uint64_t count) { return count > 1 ? (2ULL << msb(count - 1)) : 1; }
 
 // Creates/destroys threads to match the requested number.
 // Created and launched threads will immediately go to sleep in idle_loop.
@@ -225,14 +183,10 @@ static usize next_power_of_two(u64 count) { return count > 1 ? (2ULL << msb(coun
 
 void ThreadPool::set(const NumaConfig&   numaConfig,
                      Search::SharedState sharedState,
-#if STOCKFISH
-                     const Search::SearchManager::UpdateContext& updateContext
-#else
                      const Search::UpdateContext& updateContext,
                      // 🤔 やねうら王ではさらに抽象化する。
-                     usize                       requested_threads,
+                     size_t                       requested_threads,
                      const Search::WorkerFactory& worker_factory
-#endif
 ) {
 
     /*  📓
@@ -255,9 +209,9 @@ void ThreadPool::set(const NumaConfig&   numaConfig,
     }
 
 #if STOCKFISH
-    const usize requested = sharedState.options["Threads"];
+    const size_t requested = sharedState.options["Threads"];
 #else
-    const usize requested = requested_threads;
+    const size_t requested = requested_threads;
     // 🤔 やねうら王では、ここ、"Threads"の値を反映させたくない。(DL系などで、ここに柔軟性が必要)
 #endif
 
@@ -302,7 +256,7 @@ void ThreadPool::set(const NumaConfig&   numaConfig,
             return true;
         }();
 
-        std::map<NumaIndex, usize> counts;
+        std::map<NumaIndex, size_t> counts;
 
         boundThreadToNumaNode = doBindThreads
                                 ? numaConfig.distribute_threads_among_numa_nodes(requested)
@@ -311,14 +265,16 @@ void ThreadPool::set(const NumaConfig&   numaConfig,
         if (boundThreadToNumaNode.empty())
             counts[0] = requested;  // Pretend all threads are part of numa node 0
         else
-            for (usize i = 0; i < boundThreadToNumaNode.size(); ++i)
+        {
+            for (size_t i = 0; i < boundThreadToNumaNode.size(); ++i)
                 counts[boundThreadToNumaNode[i]]++;
+        }
 
         sharedState.sharedHistories.clear();
         for (auto pair : counts)
         {
             NumaIndex numaIndex = pair.first;
-            u64       count     = pair.second;
+            uint64_t  count     = pair.second;
             auto      f         = [&]() {
                 sharedState.sharedHistories.try_emplace(numaIndex, next_power_of_two(count));
             };
@@ -333,14 +289,18 @@ void ThreadPool::set(const NumaConfig&   numaConfig,
 
         while (threads.size() < requested)
         {
-            const usize    threadId      = threads.size();
+            const size_t    threadId      = threads.size();
             const NumaIndex numaId        = doBindThreads ? boundThreadToNumaNode[threadId] : 0;
             auto create_thread = [&]() {
 #if STOCKFISH
-                auto manager =
-                  threadId == 0 ? std::make_unique<Search::SearchManager>(updateContext) : nullptr;
-                // 💡 以前のStockfishはmain thread以外にNullSearchManagerを渡していたが、現行ではnullptr。
-                //     やねうら王ではSearchManagerをEngine派生classが持ち、WorkerFactory経由でWorkerを生成する。
+                auto manager = threadId == 0
+                               ? std::unique_ptr<Search::ISearchManager>(
+                                   std::make_unique<Search::SearchManager>(updateContext))
+                               : std::make_unique<Search::NullSearchManager>();
+                // 💡 Stockfishのこの実装は、main threadのときだけSearchManagerを渡して、main thread以外のときは
+                //     SearchManagerを使わせない(NullSearchManagerを渡す)という意味。しかし、結局探索部からmain threadでしか
+                //     SearchManagerを呼び出さないので、このような設計にする必要はないと思う。
+                //     WorkerからSearchManagerにアクセスできればそれだけでいいので、やねうら王では上の設計は採用しない。
 #endif
 
                 // When not binding threads we want to force all access to happen
@@ -368,7 +328,6 @@ void ThreadPool::set(const NumaConfig&   numaConfig,
             };
 
             // Ensure the worker thread inherits the intended NUMA affinity at creation.
-            // 生成時にスレッドが意図したNUMAアフィニティを継承するようにする。
             if (doBindThreads)
                 numaConfig.execute_on_numa_node(numaId, create_thread);
             else
@@ -394,7 +353,7 @@ void ThreadPool::set(const NumaConfig&   numaConfig,
 //     つまりは、このmethodは対局ごとに対局開始時に必ず呼び出される。
 
 void ThreadPool::clear() {
-	if (threads.empty())
+	if (threads.size() == 0)
 		return;
 
 	for (auto&& th : threads)
@@ -417,17 +376,17 @@ void ThreadPool::clear() {
 #endif
 }
 
-void ThreadPool::run_on_thread(usize threadId, std::function<void()> f) {
+void ThreadPool::run_on_thread(size_t threadId, std::function<void()> f) {
 	assert(threads.size() > threadId);
 	threads[threadId]->run_custom_job(std::move(f));
 }
 
-void ThreadPool::wait_on_thread(usize threadId) {
+void ThreadPool::wait_on_thread(size_t threadId) {
 	assert(threads.size() > threadId);
 	threads[threadId]->wait_for_search_finished();
 }
 
-usize ThreadPool::num_threads() const { return threads.size(); }
+size_t ThreadPool::num_threads() const { return threads.size(); }
 
 
 // Wakes up main thread waiting in idle_loop() and returns immediately.
@@ -436,71 +395,220 @@ usize ThreadPool::num_threads() const { return threads.size(); }
 // idle_loop() で待機しているメインスレッドを起こし、すぐにリターンする。
 // メインスレッドは他のスレッドを起こして探索を開始する。
 
+// 2026-09-28 NALLOC: 同じ総ノード数の中で、 揺れる局面 (V が高い局面) に多く配る。
+//   V = P2Volm::value(pos) = 両玉の 8 近傍のうち**駒が乗っていない升**への敵の利き数の和。
+//   ΔR² +3.475 で |静的評価 - 20万ノード探索| を当てる (runs/prereg/DESIGN-20260928-VOLM-FAMILY.md)。
+//
+//   🚨総和は「銀行」で保証する。 平均で正規化すると局ごとに総和がずれ、
+//     さらに「高 V 局面へ誘導するほどノードを稼げる」フィードバックが開いて判定が壊れる。
+//   🚨残高は**要求量**で記帳する (実消費ではない)。 同ノード対局の 6.6% の手は詰みで早期終了し
+//     1 局の実消費は N x 手数 の中央 93.8%。 余りを回収すると NALLOC 側だけ約 6% ノードが増え
+//     +6 Elo ≈ +0.9pt の偽陽性が出る (期待効果と同じ大きさ)。
+//   既定は全 bin 1024 = 一様 = 現行と完全に bit-exact (下の early return で V も計算しない)。
+namespace NAlloc {
+
+// 1 局のあいだ持ち越す残高 (main thread からしか触らない。 usinewgame でリセット)
+inline int64_t bank = 0;
+
+// 🚨枯渇の計測: 「重みは 1024 より大きいのに、 残高が足りず希望額を配れなかった」手の数。
+//   序盤は貯金が無いので高 V 局面が来ても増やせない。 これを測らないと
+//   「効いているつもりで効いていない」が起きる (fable 指定の関門 2)。
+inline int64_t n_go     = 0;   // この局で配った手数
+inline int64_t n_want   = 0;   // うち「増やしたかった」手数 (w > 1024)
+inline int64_t n_short  = 0;   // うち「残高不足で希望額に届かなかった」手数
+inline int64_t n_floor  = 0;   // うち WMIN の下限で切り上げた手数
+inline int64_t sum_req  = 0;   // 要求量の合計 (総ノードの検証用)
+inline int64_t sum_base = 0;   // 一様なら使ったはずの合計 (= N x 手数)
+
+void reset() { bank = 0; n_go = n_want = n_short = n_floor = sum_req = sum_base = 0; }
+
+// 1 局分の要約。 枯渇率 = short / want。 高いと treatment が薄い。
+void dump() {
+    if (n_go == 0)
+        return;
+    sync_cout << "info string P2NALLOC go=" << n_go << " want=" << n_want << " short=" << n_short
+              << " floor=" << n_floor << " sum_req=" << sum_req << " sum_base=" << sum_base
+              << " bank=" << bank << sync_endl;
+}
+
+// limits.nodes を V に応じて書き換える。 戻り値は実際に割り当てた量 (0 = 何もしなかった)
+inline int64_t apply(const Position& pos, Search::LimitsType& limits) {
+    const int w[5] = {SPSA::NALLOC_W0, SPSA::NALLOC_W1, SPSA::NALLOC_W2,
+                      SPSA::NALLOC_W3, SPSA::NALLOC_W4};
+    // 全部 1024 なら何もしない (V も計算しない = bit-exact)
+    if (w[0] == 1024 && w[1] == 1024 && w[2] == 1024 && w[3] == 1024 && w[4] == 1024)
+        return 0;
+    if (limits.nodes <= 0)
+        return 0;                       // 同ノードモードでないときは触らない
+
+    const int64_t N = (int64_t) limits.nodes;
+    int b;
+    if (SPSA::NALLOC_PLACEBO)
+    {
+        // プラセボ腕: V ではなく局面のハッシュで同じ重みを配る。
+        //   「不均一そのもの」と「V を狙ったこと」を分離するための対照。
+        const uint64_t h = pos.key();
+        const int      r = (int) ((h >> 32) % 100);
+        // 🚨2026-09-28 修正: **実戦の探索中**の V 分布に合わせる。
+        //   局面標本では p(V>=5) = 10% だったが、 実戦の実測は **6.1%** (対局 48 局の nodes 分布より)。
+        //   標本の分布でプラセボを振ると、 プラセボだけ高 V 側に多く配られて
+        //   NALLOC より総ノードを使ってしまい**対照として不公平**になる。
+        b = r < 40 ? 0 : r < 73 ? 1 : r < 94 ? 2 : r < 98 ? 3 : 4;   // 40/33/21/4/2 ≈ 実戦の分布
+    }
+    else
+        b = P2Volm::bin(P2Volm::value(pos));
+
+    int64_t want = N * (int64_t) w[b] / 1024;                        // 希望額
+
+    // 🚨2026-09-28 修正: 固定の重みでは総ノードが揃わない。
+    //   V>=5 の出現率は局面集合ごとに **1.4% - 10%** と変わるので、 どの値で正規化しても
+    //   次の集合でずれる。 銀行は借金禁止なので、 ずれは常に NALLOC 側の損になる
+    //   (実測: 対局 48 局で -4.4%、 関門 1 の 6 局で -4.9%)。
+    //   → **使い残しを低 V 側に還元する**。 残高が貯まっているときは低 V 局面にも上乗せし、
+    //     ただし一様の N は超えない (高 V に配る分を食わないため)。
+    //   これで出現率に依存せず総和が自動で揃う。
+    //   🚨還元を無条件にすると**傾斜が消える** (低 V が毎回 N に戻るので貯金ができず、
+    //     シミュレーションで傾斜 2.2 倍 → 1.07 倍)。 → **残高の上限を超えた分だけ**還元する。
+    //     上限 = 高 V に 3 回配れる分。 これで総ノードが ±0.02% で揃い、 傾斜も 2.07-2.22 倍残る
+    //     (V>=5 の出現率 1.4% / 6.1% / 10% のどれでも成立)。
+    const int64_t cap = N * (int64_t)(SPSA::NALLOC_W3 - 1024) / 1024 * 3;
+    if (want < N && bank > cap)
+        want += std::min(bank - cap, N - want);
+
+    int64_t    req       = std::min(want, N + bank);                 // 借金禁止
+    const bool shortfall = (req < want);
+    const int64_t floored   = N * (int64_t) SPSA::NALLOC_WMIN / 1024;
+    const bool    hitFloor  = (req < floored);
+    req = std::max(req, floored);                                    // 下限
+    bank += N - req;                                                 // 🚨要求量で記帳
+    limits.nodes = (uint64_t) req;
+
+    ++n_go;
+    if (w[b] > 1024) ++n_want;
+    if (shortfall)   ++n_short;
+    if (hitFloor)    ++n_floor;
+    sum_req  += req;
+    sum_base += N;
+    return req;
+}
+
+}  // namespace NAlloc
+
 void ThreadPool::start_thinking(const OptionsMap&  options,
                                 Position&          pos,
+                                StateListPtr&      states,
                                 Search::LimitsType limits) {
 
     main_thread()->wait_for_search_finished();
 
     // 📝 increaseDepthはmain_managerに移動させた。
-    //     ここのある初期化のうち、stop以外は、Worker派生classで処理すべき。
+    //     ここのある初期化のうち、stopとabortedSearch以外は、Worker派生classで処理すべき。
     // 🌈 SearchManager::pre_start_searching()に移動させた。
 	//     これは、Workerの派生classのpre_start_searching()から呼び出される。
 #if STOCKFISH
-    main_manager()->stopOnPonderhit = stop = false;
+    main_manager()->stopOnPonderhit = stop = abortedSearch = false;
     main_manager()->ponder                                 = limits.ponderMode;
     increaseDepth                                          = true;
 #else
-    stop = false;
+    stop = abortedSearch = false;
 #endif
+    // 🎯理論離脱 v2: 新しい go のたびに「外から止められた」印を下ろす。
+    external_stop = false;
 
     Search::RootMoves rootMoves;
 #if STOCKFISH
-    for (const auto& uciMove : limits.searchmoves)
-    {
-        auto move = UCIEngine::to_move(pos, uciMove);
+    const auto legalmoves = MoveList<LEGAL_ALL>(pos);
 
-        if (move != Move::none())
-            rootMoves.emplace_back(move);
-    }
-
-    if (rootMoves.empty())
-        for (const auto& m : MoveList<ALL>(pos))
-            rootMoves.emplace_back(m);
-
-    Tablebases::Config tbConfig = Tablebases::rank_root_moves(options, pos, rootMoves);
-
-#else
-
-    // USIEngine::to_move()は不成も含めて合法性を確認するため、再度リストを検索しない。
-    // GenerateAllLegalMoves == falseでも、searchmovesで明示された角不成などは許可する。
     for (const auto& usiMove : limits.searchmoves)
     {
         auto move = USIEngine::to_move(pos, usiMove);
-        // resign、win、passなどは探索対象の通常の指し手ではない。
-        if (move.is_ok())
+
+        if (std::find(legalmoves.begin(), legalmoves.end(), move) != legalmoves.end())
             rootMoves.emplace_back(move);
     }
 
-    // searchmovesが指定されない場合はGenerateAllLegalMovesを反映させる。
-    // 指定された手がすべて無効だった場合も、従来どおり通常の探索に戻す。
+    // limits.searchmovesが指定されていないとき、rootMovesがemptyになる。
+    // このとき、すべての合法手でスタートする必要がある。
     if (rootMoves.empty())
-    {
-        bool generate_all_legal_moves =
-          options.count("GenerateAllLegalMoves") && options["GenerateAllLegalMoves"];
+        for (const auto& m : legalmoves)
+            rootMoves.emplace_back(m);
 
-        if (generate_all_legal_moves)
-            for (const auto& m : MoveList<LEGAL_ALL>(pos))
+#else
+
+    // 🌈  GenerateAllLegalMoves反映させないと..
+    bool generate_all_legal_moves =
+      options.count("GenerateAllLegalMoves") && options["GenerateAllLegalMoves"];
+
+    // ⚠ MoveList<LEGAL_ALL>とMoveList<LEGAL>は異なる型なので1つの変数に代入できない。
+    //     std::variantを使うよりは次のように書いたほうがすっきりする。
+
+    auto setup_rootMoves = [&](auto& moveList) {
+        for (const auto& usiMove : limits.searchmoves)
+        {
+            auto move = USIEngine::to_move(pos, usiMove);
+
+            if (std::find(moveList.begin(), moveList.end(), move) != moveList.end())
+                rootMoves.emplace_back(move);
+        }
+
+        if (rootMoves.empty())
+            for (const auto& m : moveList)
                 rootMoves.emplace_back(m);
-        else
-            for (const auto& m : MoveList<LEGAL>(pos))
-                rootMoves.emplace_back(m);
+    };
+
+    if (generate_all_legal_moves) {
+        auto legalmoves = MoveList<LEGAL_ALL>(pos);
+        setup_rootMoves(legalmoves);
+    } else {
+        auto legalmoves = MoveList<LEGAL>(pos);
+        setup_rootMoves(legalmoves);
     }
 
 #endif
 
-    // Each worker owns its root history, including repetition metadata.
-    // 各Workerは千日手の情報も含め、ルート以前の履歴を自分で所有する。
+	// 🎯BookAware (定跡反映型探索、 2026-09-25): root の各手に下駄を付ける。
+	//   ここで 1 回だけ計算する。 この直後に rootMoves が全 worker へコピーされるので、
+	//   worker 側は int を読むだけで済む (探索中の分岐も定跡参照も増えない = NPS 税ゼロ)。
+	//   ybb の fstream seek は main thread からのこの 1 回だけなので thread safe。
+	//   BookAwareBias=0 のときは annotate が即座に return するので bit-exact。
+	//   設計 runs/prereg/DESIGN-20260925-BOOKAWARE.md §5.1 / §5.2
+#if defined(USE_BOOK_AWARE)
+	// 🚨ゲート (設計 §15): 相手の消費時間から「相手が定跡を辿っているか」を更新する。
+	//   root が定跡に載っていることは相手の準備の証拠にならない (我々自身が定跡なしで
+	//   96% の局を 60 手目まで定跡内で指す) ので、 証拠が無ければ avoid は効かせない。
+	//   limits と root 手番が揃うのはここだけ。
+	BookAware::manager.on_go(limits, pos.side_to_move(), pos.game_ply());
+#endif
+
+	// 🚨NALLOC はここで limits.nodes を書き換える (worker へコピーされる前)。
+	//   停止判定は main thread が worker.limits.nodes を読むので、 コピー前なら Threads>1 でも一貫する。
+	NAlloc::apply(pos, limits);
+
+    //Tablebases::Config tbConfig = Tablebases::rank_root_moves(options, pos, rootMoves);
+    // ⇨  Tablebasesは将棋では用いないのでコメントアウト
+
+    // After ownership transfer 'states' becomes empty, so if we stop the search
+    // and call 'go' again without setting a new position states.get() == nullptr.
+
+    // 所有権の移動後、'states' は空になるため、検索を中断して
+    // 新しい局面を設定せずに再度 'go' を呼び出すと、states.get() == nullptr となる。
+
+    assert(states.get() || setupStates.get());
+
+    if (states.get())
+        setupStates = std::move(states);  // Ownership transfer, states is now empty
+
+    // We use Position::set() to set root position across threads. But there are
+    // some StateInfo fields (previous, pliesFromNull, capturedPiece) that cannot
+    // be deduced from a fen string, so set() clears them and they are set from
+    // setupStates->back() later. The rootState is per thread, earlier states are
+    // shared since they are read-only.
+
+    // 複数のスレッドでルート局面を設定するために Position::set() を使用します。
+    // しかし、StateInfo の一部のフィールド（previous、pliesFromNull、capturedPiece）は
+    // FEN 文字列からは推測できないため、set() はそれらをクリアし、後で setupStates->back() から設定されます。
+    // rootState はスレッドごとに個別ですが、それ以前の状態は読み取り専用のため共有されます。
+
     for (auto&& th : threads)
     {
         th->run_custom_job([&]() {
@@ -508,21 +616,35 @@ void ThreadPool::start_thinking(const OptionsMap&  options,
             th->worker->limits = limits;
             th->worker->nodes = th->worker->tbHits = th->worker->bestMoveChanges = 0;
             th->worker->nmpMinPly                                                = 0;
-            th->worker->rootDepth                                                = 0;
-            th->worker->rootMoves                                                = rootMoves;
-            th->worker->rootPos.set(pos.fen(), pos.is_chess960());
-            th->worker->rootPos.copy_state_infos(pos);
+            th->worker->rootDepth = th->worker->completedDepth = 0;
+            th->worker->rootMoves                              = rootMoves;
+            th->worker->rootPos.set(pos.fen(), pos.is_chess960(), &th->worker->rootState);
+            th->worker->rootState = setupStates->back();
             th->worker->tbConfig  = tbConfig;
 #else
+
             th->worker->limits = limits;
             th->worker->nodes  = 0;
+#endif
 
-            // 📝 tbHits、tbConfigは将棋では使わない。
+			// 📝 tbHits、tbConfigは将棋では使わない。
+
+#if STOCKFISH
+            th->worker->nmpMinPly = 0;
+			th->worker->bestMoveChanges = 0;
+            th->worker->rootDepth = th->worker->completedDepth = 0;
+
+            // 🤔 やねうら王では、Worker派生classのpre_start_searching()で行うようにする。
+            //     やねうら王では、void Search::YaneuraOuWorker::pre_start_searching()で行っている。
+#endif
+
             th->worker->rootMoves = rootMoves;
-            th->worker->rootPos.copy_from(pos);
+            th->worker->rootPos.set(pos.sfen(), &th->worker->rootState);
+            th->worker->rootState = setupStates->back();
 
-            // rootPosの設定後に、通常探索側で探索開始時の初期化を行う。
-            // (rootPosを使って入玉判定などを行うため)
+#if !STOCKFISH
+			// ⚠ どうせなら、↑でworker->rootPos.set()が終わってから呼び出したい。
+			//     (rootPosを使って入玉判定などを行いたいため)
             th->worker->pre_start_searching();
 #endif
 		});
@@ -534,70 +656,10 @@ void ThreadPool::start_thinking(const OptionsMap&  options,
     main_thread()->start_searching();
 }
 
-#if defined(YANEURAOU_ENGINE)
-// 並列探索において一番良い思考をしたthreadの選出。
-Thread* ThreadPool::get_best_thread() const {
+// ⚠ このメソッドは、やねうら王の標準探索エンジンでしか使わないので、
+//     YaneuraOuEngine側に移動させた。
+//Thread* ThreadPool::get_best_thread() const
 
-    Thread* bestThread = threads.front().get();
-    Value   minScore   = VALUE_INFINITE;
-
-    std::unordered_map<Move, i64, Move::MoveHash> votes(
-      2 * std::min(size(), bestThread->worker->rootMoves.size()));
-
-    for (auto&& th : threads)
-        minScore = std::min(minScore, th->worker->rootMoves[0].score);
-
-    // Vote according to score, and select the best thread
-    // 評価値に応じて投票し、最善のスレッドを選ぶ。
-    for (auto&& th : threads)
-        votes[th->worker->rootMoves[0].pv[0]] += th->worker->rootMoves[0].score - minScore + 14;
-
-    for (auto&& th : threads)
-    {
-        const auto& bestThreadMove = bestThread->worker->rootMoves[0];
-        const auto& newThreadMove  = th->worker->rootMoves[0];
-
-        const auto bestThreadMoveVote = votes[bestThreadMove.pv[0]];
-        const auto newThreadMoveVote  = votes[newThreadMove.pv[0]];
-
-        // Aborted (d1) searches may lead to inexact win (or loss) scores.
-        // 深さ1の探索を途中で打ち切ると、勝ち・負けの評価値が未確定の場合がある。
-        const bool bestThreadDecisive = bestThreadMove.score != -VALUE_INFINITE
-                                     && is_decisive(bestThreadMove.score)
-                                     && !bestThreadMove.is_inexact();
-        const bool newThreadDecisive = newThreadMove.score != -VALUE_INFINITE
-                                    && is_decisive(newThreadMove.score)
-                                    && !newThreadMove.is_inexact();
-
-        if (bestThreadDecisive)
-        {
-            // Make sure we pick the shortest mate / TB conversion.
-            // 詰み・詰まされや、テーブルベースで勝敗が確定した手の中で最短のものを選ぶ。
-            if (newThreadDecisive && std::abs(newThreadMove.score) > std::abs(bestThreadMove.score))
-            {
-#if STOCKFISH
-                assert((is_win(bestThreadMove.score) && is_win(newThreadMove.score))
-                       || (is_loss(bestThreadMove.score) && is_loss(newThreadMove.score)));
-#else
-                // 勝敗が食い違う場合は、従来どおり現在の候補を維持する。
-                if (is_win(bestThreadMove.score) != is_win(newThreadMove.score))
-                    continue;
-#endif
-
-                bestThread = th.get();
-            }
-        }
-        else if (newThreadDecisive
-                 || (!is_loss(newThreadMove.score)
-                     && (newThreadMoveVote > bestThreadMoveVote
-                         || (newThreadMoveVote == bestThreadMoveVote
-                             && newThreadMove.pv.size() > bestThreadMove.pv.size()))))
-            bestThread = th.get();
-    }
-
-    return bestThread;
-}
-#endif // defined(YANEURAOU_ENGINE)
 
 // Start non-main threads.
 // Will be invoked by main thread after it has started searching.
@@ -624,12 +686,8 @@ void ThreadPool::wait_for_search_finished() const {
 			th->wait_for_search_finished();
 }
 
-std::vector<usize> ThreadPool::get_bound_thread_to_numa_node() const {
-    return boundThreadToNumaNode;
-}
-
-std::vector<usize> ThreadPool::get_bound_thread_count_by_numa_node() const {
-	std::vector<usize> counts;
+std::vector<size_t> ThreadPool::get_bound_thread_count_by_numa_node() const {
+	std::vector<size_t> counts;
 
 	if (!boundThreadToNumaNode.empty())
 	{
@@ -645,13 +703,6 @@ std::vector<usize> ThreadPool::get_bound_thread_count_by_numa_node() const {
 	}
 
 	return counts;
-}
-
-usize ThreadPool::numa_nodes() const {
-    std::unordered_set<usize> seen;
-    for (NumaIndex n : boundThreadToNumaNode)
-        seen.insert(n);
-    return std::max(seen.size(), usize(1));
 }
 
 void ThreadPool::ensure_network_replicated() {

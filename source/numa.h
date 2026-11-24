@@ -25,8 +25,8 @@
 #include <cstdlib>
 #include <functional>
 #include <iostream>
-#include <iterator>
 #include <limits>
+#include <iterator>  // 2026-09-15: std::inserter (libc++ 23 は推移的に含めない)
 #include <map>
 #include <memory>
 #include <mutex>
@@ -37,15 +37,12 @@
 #include <utility>
 #include <vector>
 #include <cstring>
+#include <optional>
 
-#include "misc.h"
 #include "shm.h"
-#include "thread_native.h"
 
 // We support linux very well, but we explicitly do NOT support Android,
 // because there is no affected systems, not worth maintaining.
-// Linuxには十分対応しているが、Androidには明示的に対応しない。
-// NUMAの影響を受ける対象システムがなく、保守に見合わないため。
 #if defined(__linux__) && !defined(__ANDROID__)
     #if !defined(_GNU_SOURCE)
         #define _GNU_SOURCE
@@ -56,8 +53,11 @@
     #if _WIN32_WINNT < 0x0601
         #undef _WIN32_WINNT
         #define _WIN32_WINNT 0x0601  // Force to include needed API prototypes
-        // 必要なAPIの宣言がヘッダーから読み込まれるようにする。
     #endif
+
+// On Windows each processor group can have up to 64 processors.
+// https://learn.microsoft.com/en-us/windows/win32/procthread/processor-groups
+static constexpr size_t WIN_PROCESSOR_GROUP_SIZE = 64;
 
     #if !defined(NOMINMAX)
         #define NOMINMAX
@@ -75,10 +75,12 @@ using GetThreadSelectedCpuSetMasks_t = BOOL (*)(HANDLE, PGROUP_AFFINITY, USHORT,
 
 #endif
 
+#include "misc.h"
+
 namespace YaneuraOu {
 
-using CpuIndex  = usize;
-using NumaIndex = usize;
+using CpuIndex  = size_t;
+using NumaIndex = size_t;
 
 // NUMAも考慮して、このPCで使えるスレッド数を返す。
 inline CpuIndex get_hardware_concurrency() {
@@ -102,11 +104,6 @@ inline CpuIndex get_hardware_concurrency() {
 inline const CpuIndex SYSTEM_THREADS_NB = std::max<CpuIndex>(1, get_hardware_concurrency());
 
 #if defined(_WIN64)
-
-// On Windows each processor group can have up to 64 processors.
-// https://learn.microsoft.com/en-us/windows/win32/procthread/processor-groups
-// Windowsの各プロセッサグループには、最大64個のプロセッサを含められる。
-static constexpr usize WIN_PROCESSOR_GROUP_SIZE = 64;
 
 struct WindowsAffinity {
     std::optional<std::set<CpuIndex>> oldApi;
@@ -160,7 +157,7 @@ inline std::pair<BOOL, std::vector<USHORT>> get_process_group_affinity() {
 	// GetProcessGroupAffinity は、GroupArray 引数を2バイトではなく、
 	// 4バイトにアライメントさせる必要があります。
 
-	static constexpr usize GroupArrayMinimumAlignment = 4;
+	static constexpr size_t GroupArrayMinimumAlignment = 4;
     static_assert(GroupArrayMinimumAlignment >= alignof(USHORT));
 
     // The function should succeed the second time, but it may fail if the group
@@ -185,12 +182,16 @@ inline std::pair<BOOL, std::vector<USHORT>> get_process_group_affinity() {
           GetProcessGroupAffinity(GetCurrentProcess(), &GroupCount, GroupArrayAligned);
 
         if (status == 0 && GetLastError() != ERROR_INSUFFICIENT_BUFFER)
+        {
             break;
+        }
 
         if (status != 0)
+        {
             return std::make_pair(status,
                                   std::vector(GroupArrayAligned, GroupArrayAligned + GroupCount));
         }
+    }
 
     return std::make_pair(0, std::vector<USHORT>());
 }
@@ -238,7 +239,9 @@ inline WindowsAffinity get_process_affinity() {
 		// それ以外の失敗は実際のエラーです。
 
 		if (status == 0 && GetLastError() != ERROR_INSUFFICIENT_BUFFER)
+        {
             affinity.isNewDeterminate = false;
+        }
         else if (RequiredMaskCount > 0)
         {
             // If RequiredMaskCount then these affinities were never set, but it's
@@ -253,18 +256,22 @@ inline WindowsAffinity get_process_affinity() {
                                                     RequiredMaskCount, &RequiredMaskCount);
 
             if (status == 0)
+            {
                 affinity.isNewDeterminate = false;
+            }
             else
             {
                 std::set<CpuIndex> cpus;
 
                 for (USHORT i = 0; i < RequiredMaskCount; ++i)
                 {
-                    const usize procGroupIndex = groupAffinities[i].Group;
+                    const size_t procGroupIndex = groupAffinities[i].Group;
 
-                    for (usize j = 0; j < WIN_PROCESSOR_GROUP_SIZE; ++j)
+                    for (size_t j = 0; j < WIN_PROCESSOR_GROUP_SIZE; ++j)
+                    {
                         if (groupAffinities[i].Mask & (KAFFINITY(1) << j))
                             cpus.insert(procGroupIndex * WIN_PROCESSOR_GROUP_SIZE + j);
+                    }
                 }
 
                 affinity.newApi = std::move(cpus);
@@ -308,8 +315,10 @@ inline WindowsAffinity get_process_affinity() {
 	// SetProcessAffinityMask が一度も呼ばれていない場合、アフィニティはすべてのプロセッサグループに
 	// またがっているはずです。しかし、呼ばれていた場合は、1つのグループにのみ限定されているはずです。
 
-    std::vector<USHORT> groupAffinity;  // We need to capture this later and capturing
-                                        // from structured bindings requires c++20.
+    std::vector<USHORT> groupAffinity;
+
+	// We need to capture this later and capturing
+    // from structured bindings requires c++20.
 
 	// これを後でキャプチャする必要があり、構造化束縛からのキャプチャにはC++20が必要です。
 
@@ -332,12 +341,14 @@ inline WindowsAffinity get_process_affinity() {
         {
             std::set<CpuIndex> cpus;
 
-            const usize procGroupIndex = groupAffinity[0];
+            const size_t procGroupIndex = groupAffinity[0];
 
-            const u64 mask = static_cast<u64>(proc);
-            for (usize j = 0; j < WIN_PROCESSOR_GROUP_SIZE; ++j)
+            const uint64_t mask = static_cast<uint64_t>(proc);
+            for (size_t j = 0; j < WIN_PROCESSOR_GROUP_SIZE; ++j)
+            {
                 if (mask & (KAFFINITY(1) << j))
                     cpus.insert(procGroupIndex * WIN_PROCESSOR_GROUP_SIZE + j);
+            }
 
             affinity.oldApi = std::move(cpus);
         }
@@ -367,7 +378,7 @@ inline WindowsAffinity get_process_affinity() {
 
         if (GetThreadSelectedCpuSetMasks_f != nullptr)
         {
-            NativeThread th = create_native_thread(NativeThreadOptions{}, [&]() {
+            std::thread th([&]() {
                 std::set<CpuIndex> cpus;
                 bool               isAffinityFull = true;
 
@@ -386,8 +397,8 @@ inline WindowsAffinity get_process_affinity() {
 					// そうしないと、プロセッサの選択が結果のアフィニティに影響を与える可能性があります。
 					// 同じグループ内のプロセッサIDは0から順に埋められていると仮定しています。
 
-					u64 procCombined = std::numeric_limits<u64>::max();
-                    u64 sysCombined  = std::numeric_limits<u64>::max();
+					uint64_t procCombined = std::numeric_limits<uint64_t>::max();
+                    uint64_t sysCombined  = std::numeric_limits<uint64_t>::max();
 
                     for (int i = 0; i < std::min(numActiveProcessors, 2); ++i)
                     {
@@ -415,16 +426,18 @@ inline WindowsAffinity get_process_affinity() {
                             return;
                         }
 
-                        procCombined &= static_cast<u64>(proc2);
-                        sysCombined &= static_cast<u64>(sys2);
+                        procCombined &= static_cast<uint64_t>(proc2);
+                        sysCombined &= static_cast<uint64_t>(sys2);
                     }
 
                     if (procCombined != sysCombined)
                         isAffinityFull = false;
 
-                    for (usize j = 0; j < WIN_PROCESSOR_GROUP_SIZE; ++j)
+                    for (size_t j = 0; j < WIN_PROCESSOR_GROUP_SIZE; ++j)
+                    {
                         if (procCombined & (KAFFINITY(1) << j))
                             cpus.insert(procGroupIndex * WIN_PROCESSOR_GROUP_SIZE + j);
+                    }
                 }
 
                 // We have to detect the case where the affinity was not set,
@@ -435,7 +448,9 @@ inline WindowsAffinity get_process_affinity() {
 				// 正しく std::nullopt の結果を生成する必要があります。
 
 				if (!isAffinityFull)
+                {
                     affinity.oldApi = std::move(cpus);
+                }
             });
 
             th.join();
@@ -446,7 +461,6 @@ inline WindowsAffinity get_process_affinity() {
 }
 
 // Type machinery used to emulate Cache->GroupCount
-// Cache->GroupCountをエミュレートするための型の仕組み。
 
 template<typename T, typename = void>
 struct HasGroupCount: std::false_type {};
@@ -459,7 +473,6 @@ template<typename T, typename Pred, std::enable_if_t<HasGroupCount<T>::value, bo
 std::set<CpuIndex> readCacheMembers(const T* info, Pred&& is_cpu_allowed) {
     std::set<CpuIndex> cpus;
     // On Windows 10 this will read a 0 because GroupCount doesn't exist
-    // Windows 10ではGroupCountが存在しないため、ここでは0が読み取られる。
     int groupCount = std::max(info->Cache.GroupCount, WORD(1));
     for (WORD procGroup = 0; procGroup < groupCount; ++procGroup)
     {
@@ -524,7 +537,7 @@ inline std::set<CpuIndex> get_process_affinity() {
     if (mask == nullptr)
         std::exit(EXIT_FAILURE);
 
-    const usize masksize = CPU_ALLOC_SIZE(MaxNumCpus);
+    const size_t masksize = CPU_ALLOC_SIZE(MaxNumCpus);
 
     CPU_ZERO_S(masksize, mask);
 
@@ -587,15 +600,12 @@ struct L3Domain {
 };
 
 // Use system NUMA nodes
-// OSのNUMAノードを使う。
 struct SystemNumaPolicy {};
 // Use system-reported L3 domains
-// OSが報告するL3ドメインを使う。
 struct L3DomainsPolicy {};
 // Group system-reported L3 domains until they reach bundleSize
-// bundleSizeに達するまで、OSが報告するL3ドメインをまとめる。
 struct BundledL3Policy {
-    usize bundleSize;
+    size_t bundleSize;
 };
 
 using NumaAutoPolicy = std::variant<SystemNumaPolicy, L3DomainsPolicy, BundledL3Policy>;
@@ -676,7 +686,6 @@ class NumaConfig {
 
 #if !((defined(__linux__) && !defined(__ANDROID__)) || defined(_WIN64))
         // Fallback for unsupported systems.
-        // 対応していないシステム向けの代替処理。
         for (CpuIndex c = 0; c < SYSTEM_THREADS_NB; ++c)
             cfg.add_cpu_to_node(NumaIndex{0}, c);
 #else
@@ -717,9 +726,11 @@ class NumaConfig {
         bool l3Success = false;
         if (!std::holds_alternative<SystemNumaPolicy>(policy))
         {
-            usize l3BundleSize = 0;
+            size_t l3BundleSize = 0;
             if (const auto* v = std::get_if<BundledL3Policy>(&policy))
+            {
                 l3BundleSize = v->bundleSize;
+            }
             if (auto l3Cfg =
                   try_get_l3_aware_config(respectProcessAffinity, l3BundleSize, is_cpu_allowed))
             {
@@ -775,29 +786,31 @@ class NumaConfig {
 		//
 		// 以前は、if (STARTUP_USE_OLD_AFFINITY_API) によってガードされていました。
 
-        NumaConfig splitCfg = empty();
-
-        NumaIndex splitNodeIndex = 0;
-        for (const auto& cpus : cfg.nodes)
         {
-            if (cpus.empty())
-                continue;
+            NumaConfig splitCfg = empty();
 
-            usize lastProcGroupIndex = *(cpus.begin()) / WIN_PROCESSOR_GROUP_SIZE;
-            for (CpuIndex c : cpus)
+            NumaIndex splitNodeIndex = 0;
+            for (const auto& cpus : cfg.nodes)
             {
-                const usize procGroupIndex = c / WIN_PROCESSOR_GROUP_SIZE;
-                if (procGroupIndex != lastProcGroupIndex)
-                {
-                    splitNodeIndex += 1;
-                    lastProcGroupIndex = procGroupIndex;
-                }
-                splitCfg.add_cpu_to_node(splitNodeIndex, c);
-            }
-            splitNodeIndex += 1;
-        }
+                if (cpus.empty())
+                    continue;
 
-        cfg = std::move(splitCfg);
+                size_t lastProcGroupIndex = *(cpus.begin()) / WIN_PROCESSOR_GROUP_SIZE;
+                for (CpuIndex c : cpus)
+                {
+                    const size_t procGroupIndex = c / WIN_PROCESSOR_GROUP_SIZE;
+                    if (procGroupIndex != lastProcGroupIndex)
+                    {
+                        splitNodeIndex += 1;
+                        lastProcGroupIndex = procGroupIndex;
+                    }
+                    splitCfg.add_cpu_to_node(splitNodeIndex, c);
+                }
+                splitNodeIndex += 1;
+            }
+
+            cfg = std::move(splitCfg);
+        }
 	#endif
 
 #endif
@@ -831,28 +844,24 @@ class NumaConfig {
 	// CPUインデックスには "first-last" 形式の範囲指定がサポートされています
 	// 例えば "0-15,128-143:16-31,144-159:32-47,160-175:48-63,176-191"
 
-    static std::optional<NumaConfig> from_string(const std::string& s) {
+	static NumaConfig from_string(const std::string& s) {
         NumaConfig cfg = empty();
 
         NumaIndex n = 0;
         for (auto&& nodeStr : split(s, ":"))
         {
-            // 注意: Stockfish def601ccと同様、数値化できない部分は下のヘルパーが読み捨てる。
-            // そのため、例えば0-15:16-31xは拒否されず、0-15だけの構成として採用される。
-            // 入力全体の妥当性を保証する処理ではない。上流の修正時に見直す。
             auto indices = indices_from_shortened_string(std::string(nodeStr));
             if (!indices.empty())
             {
                 for (auto idx : indices)
+                {
                     if (!cfg.add_cpu_to_node(n, CpuIndex(idx)))
-                        return std::nullopt;
+                        std::exit(EXIT_FAILURE);
+                }
 
                 n += 1;
             }
         }
-        if (n == 0)  // failed to parse any nodes
-            // ノードを1つも読み取れなかった。
-            return std::nullopt;
 
         cfg.customAffinity = true;
 
@@ -958,7 +967,7 @@ class NumaConfig {
 		if (numThreads <= 1)
             return false;
 
-        usize largestNodeSize = 0;
+        size_t largestNodeSize = 0;
         for (auto&& cpus : nodes)
             if (cpus.size() > largestNodeSize)
                 largestNodeSize = cpus.size();
@@ -969,7 +978,7 @@ class NumaConfig {
                 <= SmallNodeThreshold;
         };
 
-        usize numNotSmallNodes = 0;
+        size_t numNotSmallNodes = 0;
         for (auto&& cpus : nodes)
             if (!is_node_small(cpus))
                 numNotSmallNodes += 1;
@@ -993,7 +1002,7 @@ class NumaConfig {
         }
         else
         {
-            std::vector<usize> occupation(nodes.size(), 0);
+            std::vector<size_t> occupation(nodes.size(), 0);
             for (CpuIndex c = 0; c < numThreads; ++c)
             {
                 NumaIndex bestNode{0};
@@ -1029,7 +1038,7 @@ class NumaConfig {
     }
 
     NumaReplicatedAccessToken bind_current_thread_to_numa_node(NumaIndex n) const {
-        if (n >= nodes.size() || nodes[n].empty())
+        if (n >= nodes.size() || nodes[n].size() == 0)
             std::exit(EXIT_FAILURE);
 
 #if defined(__linux__) && !defined(__ANDROID__)
@@ -1038,7 +1047,7 @@ class NumaConfig {
         if (mask == nullptr)
             std::exit(EXIT_FAILURE);
 
-        const usize masksize = CPU_ALLOC_SIZE(highestCpuIndex + 1);
+        const size_t masksize = CPU_ALLOC_SIZE(highestCpuIndex + 1);
 
         CPU_ZERO_S(masksize, mask);
 
@@ -1054,8 +1063,6 @@ class NumaConfig {
 
         // We yield this thread just to be sure it gets rescheduled.
         // This is defensive, allowed because this code is not performance critical.
-        // 再スケジュールされるよう、ここでスレッドの実行権を譲る。
-        // この処理は速度が重要な箇所ではないため、念のための措置を取れる。
         sched_yield();
 
 #elif defined(_WIN64)
@@ -1093,8 +1100,8 @@ class NumaConfig {
 
             for (CpuIndex c : nodes[n])
             {
-                const usize procGroupIndex     = c / WIN_PROCESSOR_GROUP_SIZE;
-                const usize idxWithinProcGroup = c % WIN_PROCESSOR_GROUP_SIZE;
+                const size_t procGroupIndex     = c / WIN_PROCESSOR_GROUP_SIZE;
+                const size_t idxWithinProcGroup = c % WIN_PROCESSOR_GROUP_SIZE;
                 groupAffinities[procGroupIndex].Mask |= KAFFINITY(1) << idxWithinProcGroup;
             }
 
@@ -1153,12 +1160,12 @@ class NumaConfig {
 
 			// We use an ordered set to be sure to get the smallest cpu number here.
 			// 最小のCPU番号を取得するために、順序付きセットを使用しています。
-            const usize forcedProcGroupIndex = *(nodes[n].begin()) / WIN_PROCESSOR_GROUP_SIZE;
+            const size_t forcedProcGroupIndex = *(nodes[n].begin()) / WIN_PROCESSOR_GROUP_SIZE;
             affinity.Group                    = static_cast<WORD>(forcedProcGroupIndex);
             for (CpuIndex c : nodes[n])
             {
-                const usize procGroupIndex     = c / WIN_PROCESSOR_GROUP_SIZE;
-                const usize idxWithinProcGroup = c % WIN_PROCESSOR_GROUP_SIZE;
+                const size_t procGroupIndex     = c / WIN_PROCESSOR_GROUP_SIZE;
+                const size_t idxWithinProcGroup = c % WIN_PROCESSOR_GROUP_SIZE;
 
 				// We skip processors that are not in the same processor group.
                 // If everything was set up correctly this will never be an issue,
@@ -1196,16 +1203,10 @@ class NumaConfig {
 
     template<typename FuncT>
     void execute_on_numa_node(NumaIndex n, FuncT&& f) const {
-        NativeThread th = create_native_thread(NativeThreadOptions{}, [this, &f, n]() {
+        std::thread th([this, &f, n]() {
             bind_current_thread_to_numa_node(n);
             std::forward<FuncT>(f)();
         });
-
-        if (!th.joinable())
-        {
-            std::cerr << "Failed to execute function on NUMA node\n";
-            std::exit(EXIT_FAILURE);
-        }
 
         th.join();
     }
@@ -1286,8 +1287,8 @@ class NumaConfig {
         return true;
     }
 
-    static std::vector<usize> indices_from_shortened_string(const std::string& s) {
-        std::vector<usize> indices;
+    static std::vector<size_t> indices_from_shortened_string(const std::string& s) {
+        std::vector<size_t> indices;
 
         if (s.empty())
             return indices;
@@ -1300,19 +1301,17 @@ class NumaConfig {
             auto parts = split(ss, "-");
             if (parts.size() == 1)
             {
-                auto c = str_to_size_t(std::string(parts[0]));
-                if (c.has_value())
-                    indices.emplace_back(*c);
+                const CpuIndex c = CpuIndex{str_to_size_t(std::string(parts[0]))};
+                indices.emplace_back(c);
             }
             else if (parts.size() == 2)
             {
-                constexpr usize MaxIndices = 1 << 20;  // prevent oom
-                // メモリ枯渇を防ぐ。
-                auto cfirst = str_to_size_t(std::string(parts[0]));
-                auto clast  = str_to_size_t(std::string(parts[1]));
-                if (cfirst.has_value() && clast.has_value() && *clast - *cfirst < MaxIndices)
-                    for (usize c = *cfirst; c <= *clast; ++c)
-                        indices.emplace_back(c);
+                const CpuIndex cfirst = CpuIndex{str_to_size_t(std::string(parts[0]))};
+                const CpuIndex clast  = CpuIndex{str_to_size_t(std::string(parts[1]))};
+                for (size_t c = cfirst; c <= clast; ++c)
+                {
+                    indices.emplace_back(c);
+                }
             }
         }
 
@@ -1324,10 +1323,6 @@ class NumaConfig {
     // On Linux we read from standardized kernel sysfs, with a fallback to single NUMA
     // node. On Windows we utilize GetNumaProcessorNodeEx, which has its quirks, see
     // comment for Windows implementation of get_process_affinity.
-    // プロセッサとNUMAノードの対応をシステムへ問い合わせる。
-    // Linuxでは標準化されたカーネルのsysfsを読み、取得できなければ単一NUMAノードとして扱う。
-    // WindowsではGetNumaProcessorNodeExを使う。このAPIの注意点については、
-    // get_process_affinity()のWindows実装にあるコメントを参照。
     template<typename Pred>
     static NumaConfig from_system_numa([[maybe_unused]] bool   respectProcessAffinity,
                                        [[maybe_unused]] Pred&& is_cpu_allowed) {
@@ -1339,9 +1334,6 @@ class NumaConfig {
         // any thread can be scheduled on all processors.
         // We try to gather this information from the sysfs first
         // https://www.kernel.org/doc/Documentation/ABI/stable/sysfs-devices-node
-        // Linuxにはプロセッサグループがなく、どのスレッドもすべてのプロセッサへ
-        // 割り当てられるため、処理は単純になる。
-        // まずsysfsからこの情報を取得する。
 
         bool useFallback = false;
         auto fallback    = [&]() {
@@ -1350,14 +1342,15 @@ class NumaConfig {
         };
 
         // /sys/devices/system/node/online contains information about active NUMA nodes
-        // /sys/devices/system/node/onlineには、稼働中のNUMAノードの情報がある。
         auto nodeIdsStr = read_file_to_string("/sys/devices/system/node/online");
         if (!nodeIdsStr.has_value() || nodeIdsStr->empty())
+        {
             fallback();
+        }
         else
         {
             remove_whitespace(*nodeIdsStr);
-            for (usize n : indices_from_shortened_string(*nodeIdsStr))
+            for (size_t n : indices_from_shortened_string(*nodeIdsStr))
             {
                 // /sys/devices/system/node/node.../cpulist
                 std::string path =
@@ -1366,8 +1359,6 @@ class NumaConfig {
                 // Now, we only bail if the file does not exist. Some nodes may be
                 // empty, that's fine. An empty node still has a file that appears
                 // to have some whitespace, so we need to handle that.
-                // ファイルが存在しない場合だけ、取得を断念する。空のノードがあっても問題ない。
-                // 空のノードにも空白を含むファイルがあるため、それを扱えるようにする。
                 if (!cpuIdsStr.has_value())
                 {
                     fallback();
@@ -1376,9 +1367,11 @@ class NumaConfig {
                 else
                 {
                     remove_whitespace(*cpuIdsStr);
-                    for (usize c : indices_from_shortened_string(*cpuIdsStr))
+                    for (size_t c : indices_from_shortened_string(*cpuIdsStr))
+                    {
                         if (is_cpu_allowed(c))
                             cfg.add_cpu_to_node(n, c);
+                    }
                 }
             }
         }
@@ -1408,14 +1401,15 @@ class NumaConfig {
                                  + static_cast<CpuIndex>(number);
                 if (status != 0 && nodeNumber != std::numeric_limits<USHORT>::max()
                     && is_cpu_allowed(c))
+                {
                     cfg.add_cpu_to_node(nodeNumber, c);
+                }
             }
         }
 
 #else
 
         abort();  // should not reach here
-        // ここに到達してはならない。
 
 #endif
 
@@ -1424,10 +1418,9 @@ class NumaConfig {
 
     template<typename Pred>
     static std::optional<NumaConfig> try_get_l3_aware_config(
-      bool respectProcessAffinity, usize bundleSize, [[maybe_unused]] Pred&& is_cpu_allowed) {
+      bool respectProcessAffinity, size_t bundleSize, [[maybe_unused]] Pred&& is_cpu_allowed) {
         // Get the normal system configuration so we know to which NUMA node
         // each L3 domain belongs.
-        // 各L3ドメインが属するNUMAノードを知るため、通常のシステム構成を取得する。
         NumaConfig systemConfig =
           NumaConfig::from_system(SystemNumaPolicy{}, respectProcessAffinity);
         std::vector<L3Domain> l3Domains;
@@ -1435,20 +1428,26 @@ class NumaConfig {
 #if defined(__linux__) && !defined(__ANDROID__)
 
         std::set<CpuIndex> seenCpus;
-        for (const auto& [next, _] : systemConfig.nodeByCpu)
+        auto               nextUnseenCpu = [&seenCpus]() {
+            for (CpuIndex i = 0;; ++i)
+                if (!seenCpus.count(i))
+                    return i;
+        };
 
+        while (true)
         {
-            if (seenCpus.count(next))
-                continue;
+            CpuIndex next = nextUnseenCpu();
             auto     siblingsStr =
               read_file_to_string("/sys/devices/system/cpu/cpu" + std::to_string(next)
                                   + "/cache/index3/shared_cpu_list");
 
             if (!siblingsStr.has_value() || siblingsStr->empty())
-                continue;
+            {
+                break;  // we have read all available CPUs
+            }
 
             L3Domain domain;
-            for (usize c : indices_from_shortened_string(*siblingsStr))
+            for (size_t c : indices_from_shortened_string(*siblingsStr))
             {
                 if (is_cpu_allowed(c))
                 {
@@ -1458,8 +1457,10 @@ class NumaConfig {
                 seenCpus.insert(c);
             }
             if (!domain.cpus.empty())
+            {
                 l3Domains.emplace_back(std::move(domain));
             }
+        }
 
 #elif defined(_WIN64)
 
@@ -1487,7 +1488,6 @@ class NumaConfig {
                 }
             }
             // Variable length data structure, advance to next
-            // 可変長のデータ構造なので、現在の要素のサイズだけ進めて次の要素を得る。
             info = reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(
               reinterpret_cast<char*>(info) + info->Size);
         }
@@ -1500,7 +1500,7 @@ class NumaConfig {
     }
 
 
-    static NumaConfig from_l3_info(std::vector<L3Domain>&& domains, usize bundleSize) {
+    static NumaConfig from_l3_info(std::vector<L3Domain>&& domains, size_t bundleSize) {
         assert(!domains.empty());
 
         std::map<NumaIndex, std::vector<L3Domain>> list;
@@ -1514,11 +1514,10 @@ class NumaConfig {
             bool changed;
             // Scan through pairs and merge them. With roughly equal L3 sizes, should give
             // a decent distribution.
-            // 組ごとに調べて結合する。L3のサイズがほぼ等しければ、適度に分散できるはず。
             do
             {
                 changed = false;
-                for (usize j = 0; j + 1 < ds.size(); ++j)
+                for (size_t j = 0; j + 1 < ds.size(); ++j)
                 {
                     if (ds[j].cpus.size() + ds[j + 1].cpus.size() <= bundleSize)
                     {
@@ -1528,15 +1527,16 @@ class NumaConfig {
                     }
                 }
                 // ds.size() has decreased if changed is true, so this loop will terminate
-                // changedがtrueならds.size()が減っているので、このループは必ず終了する。
             } while (changed);
             for (const L3Domain& d : ds)
             {
                 const NumaIndex dn = n++;
                 for (CpuIndex cpu : d.cpus)
+                {
                     cfg.add_cpu_to_node(dn, cpu);
                 }
             }
+        }
         return cfg;
     }
 };
@@ -1701,7 +1701,7 @@ class NumaReplicated: public NumaReplicatedBase {
 
 
 		実際の使い方。
-				const LazyNumaReplicated<Eval::Evaluator>& network;
+				const LazyNumaReplicated<Eval::Evaluator>& networks;
 		のように評価関数をLazyNumaReplicatedでくるむ。
 
 		以下のようなコードで、実際にnumaにアクセスする。まだ複製が完了していないnumaであれば、
@@ -1710,9 +1710,7 @@ class NumaReplicated: public NumaReplicatedBase {
 			void Search::Worker::ensure_network_replicated() {
 				// Access once to force lazy initialization.
 				// We do this because we want to avoid initialization during search.
-				// 一度参照して遅延初期化を実行する。
-				// 探索中に初期化が起きるのを避けるため。
-				(void) (network[numaAccessToken]);
+				(void) (networks[numaAccessToken]);
 			}
 
 */
@@ -1851,13 +1849,10 @@ class LazyNumaReplicatedSystemWide: public NumaReplicatedBase {
    public:
     using ReplicatorFuncType = std::function<T(const T&)>;
 
-
-#if !STOCKFISH
-    // Defer loading the source until the engine is ready.
-    // エンジンの準備ができるまで、複製元の読み込みを遅らせる。
-    explicit LazyNumaReplicatedSystemWide(NumaReplicationContext& ctx) :
-        NumaReplicatedBase(ctx) {}
-#endif
+    LazyNumaReplicatedSystemWide(NumaReplicationContext& ctx) :
+        NumaReplicatedBase(ctx) {
+        prepare_replicate_from(std::make_unique<T>());
+    }
 
     LazyNumaReplicatedSystemWide(NumaReplicationContext& ctx, std::unique_ptr<T>&& source) :
         NumaReplicatedBase(ctx) {
@@ -1917,17 +1912,8 @@ class LazyNumaReplicatedSystemWide: public NumaReplicatedBase {
     }
 
     void on_numa_config_changed() override {
-#if !STOCKFISH
-        // The engine may change NUMA policy before loading the source.
-        // 複製元の読み込みより先にNUMA設定が変更される場合がある。
-        if (instances.empty())
-            return;
-#endif
-
         // Use the first one as the source. It doesn't matter which one we use,
         // because they all must be identical, but the first one is guaranteed to exist.
-        // 先頭のインスタンスを複製元として使う。すべて同一なのでどれを使ってもよいが、
-        // 先頭のインスタンスは必ず存在することが保証されている。
         auto source = std::make_unique<T>(*instances[0]);
         prepare_replicate_from(std::move(source));
     }
@@ -1936,16 +1922,14 @@ class LazyNumaReplicatedSystemWide: public NumaReplicatedBase {
     mutable std::vector<SystemWideSharedConstant<T>> instances;
     mutable std::mutex                               mutex;
 
-    usize get_discriminator(NumaIndex idx) const {
+    std::size_t get_discriminator(NumaIndex idx) const {
         const NumaConfig& cfg     = get_numa_config();
         const NumaConfig& cfg_sys = NumaConfig::from_system(SystemNumaPolicy{}, false);
         // as a discriminator, locate the hardware/system numadomain this cpuindex belongs to
-        // 識別子を得るため、このCPUが属するハードウェア上のNUMAドメインを調べる。
         CpuIndex    cpu     = *cfg.nodes[idx].begin();  // get a CpuIndex from NumaIndex
-        // NumaIndexからCpuIndexを1つ得る。
         NumaIndex   sys_idx = cfg_sys.is_cpu_assigned(cpu) ? cfg_sys.nodeByCpu.at(cpu) : 0;
         std::string s       = cfg_sys.to_string() + "$" + std::to_string(sys_idx);
-        return static_cast<usize>(hash_string(s));
+        return static_cast<std::size_t>(hash_string(s));
     }
 
     void ensure_present(NumaIndex idx) const {
@@ -1958,7 +1942,6 @@ class LazyNumaReplicatedSystemWide: public NumaReplicatedBase {
 
         std::unique_lock<std::mutex> lock(mutex);
         // Check again for races.
-        // 競合に備えて、ロック取得後にもう一度確認する。
         if (instances[idx] != nullptr)
             return;
 
@@ -1976,9 +1959,6 @@ class LazyNumaReplicatedSystemWide: public NumaReplicatedBase {
         // Note that we cannot move here as we need to reallocate the data
         // on the correct NUMA node.
         // Even in the case of a single NUMA node we have to copy since it's shared memory.
-        // まず、先頭のインスタンスが存在するようにすればよい。
-        // 正しいNUMAノード上にデータを確保し直す必要があるので、ここではmoveできない。
-        // 共有メモリを使うため、NUMAノードが1つだけの場合でもコピーが必要。
         if (cfg.requires_memory_replication())
         {
             assert(cfg.num_numa_nodes() > 0);
@@ -1988,7 +1968,6 @@ class LazyNumaReplicatedSystemWide: public NumaReplicatedBase {
             });
 
             // Prepare others for lazy init.
-            // 残りのノードは、必要になったときに遅延初期化する。
             instances.resize(cfg.num_numa_nodes());
         }
         else
@@ -2084,7 +2063,6 @@ inline const NumaConfig& NumaReplicatedBase::get_numa_config() const {
 }
 
 
-#if !STOCKFISH
 // 🌈 やねうら王ではThreadIds構造体でまとめて管理する。
 
 namespace Search {
@@ -2092,9 +2070,9 @@ namespace Search {
 	// StockfishのWorker, Threadで渡している構造体。
 	struct ThreadIds
 	{
-		usize threadIdx;
-		usize numaThreadIdx;
-		usize numaTotal;
+		size_t threadIdx;
+		size_t numaThreadIdx;
+		size_t numaTotal;
 		NumaReplicatedAccessToken numaAccessToken;
 	};
 
@@ -2104,7 +2082,6 @@ namespace Search {
 	// Worker派生classのfactory
 	typedef std::function<LargePagePtr<Worker>(SharedState& sharedState, const ThreadIds& ids)> WorkerFactory;
 }
-#endif
 
 } // namespace YaneuraOu
 

@@ -1,5 +1,4 @@
 ﻿#include "evaluate_io.h"
-#include "../extra/system_io.h"
 #include "../misc.h"
 #include "../usi.h"
 
@@ -102,14 +101,14 @@ namespace EvalIO {
 				else if (in_.file_or_memory.file() && out_.file_or_memory.file())
 				{
 					std::vector<u8> buffer(input_block_size);
-					std::ifstream ifs(path_from_utf8(in_.file_or_memory.filename), std::ios::binary);
+					std::ifstream ifs(in_.file_or_memory.filename, std::ios::binary);
 					if (ifs) ifs.read(reinterpret_cast<char*>(buffer.data()), input_block_size);
 					else
 					{
 						std::cout << "info string read file error , file = " << in_.file_or_memory.filename << std::endl;
 						return false;
 					};
-					std::ofstream ofs(path_from_utf8(out_.file_or_memory.filename), std::ios::binary);
+					std::ofstream ofs(out_.file_or_memory.filename, std::ios::binary);
 					if (ofs) ofs.write(reinterpret_cast<char*>(buffer.data()), output_block_size);
 					else
 					{
@@ -172,8 +171,7 @@ namespace EvalIO {
 							case 4: n = *(s32*)src; break;
 							case 8: n = *(s64*)src; break;
 							default:
-								ASSERT_LV3(false);
-								sf_unreachable();
+								UNREACHABLE;
 							}
 						}
 						else {
@@ -189,8 +187,7 @@ namespace EvalIO {
 						case 4: *(s32*)dst = (s32)n; break;
 						case 8: *(s64*)dst = (s64)n; break;
 						default:
-							ASSERT_LV3(false);
-							sf_unreachable();
+							UNREACHABLE;
 						}
 
 						src += in_.element_size;

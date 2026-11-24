@@ -1,36 +1,25 @@
-﻿#ifndef POSITION_H_INCLUDED
+#ifndef POSITION_H_INCLUDED
 #define POSITION_H_INCLUDED
 
 #include <array>
-#include <cassert>
-#include <iosfwd>
+#include <deque>
+#include <memory> // For std::unique_ptr
 #include <optional>
 #include <stdexcept>
-#include <string>
 
-#include "attacks.h"
 #include "bitboard.h"
-#include "misc.h"
+#include "evaluate.h"
 #include "types.h"
 
-#if !STOCKFISH
-#if defined(YANEURAOU_MATE_ENGINE) || defined(TANUKI_MATE_ENGINE)
-#include <deque>
-#endif
-#include "extra/tools.h"
-#include "evaluate.h"
-#endif
-
-#if defined(EVAL_NNUE) || defined(EVAL_SFNN)
+#if defined(EVAL_NNUE)
 #include "eval/nnue/nnue_accumulator.h"
 #endif
 
 #include "extra/key128.h"
 #include "extra/long_effect.h"
+#include "misc.h"
 
 namespace YaneuraOu {
-
-struct SharedHistories;
 
 // --------------------
 //     局面の情報
@@ -38,12 +27,12 @@ struct SharedHistories;
 
 // StateInfo struct stores information needed to restore a Position object to
 // its previous state when we retract a move. Whenever a move is made on the
-// board (by calling Position::do_move), its state is stored in Position.
+// board (by calling Position::do_move), a StateInfo object must be passed.
 
 // StateInfo構造体は、指し手を戻す際にPositionオブジェクトを
 // 以前の状態に復元するために必要な情報を格納する。
 // 盤上で指し手が行われるたびに（Position::do_moveを呼び出す際に）、
-// Position内部に次のStateInfoを保存する。
+// StateInfoオブジェクトを渡さなければならない。
 
 // 💡 StateInfoは、undo_move()で局面を戻すときに情報を元の状態に戻すのが
 //     面倒なものを詰め込んでおくための構造体。
@@ -61,17 +50,17 @@ struct StateInfo {
 			枚数にすると実装が面倒になるので、やねうら王は、
 			Zobrist::psq[pc][8]をaddしていく。
 	*/
-    HASH_KEY materialKey;
+    Key materialKey;
 
 	// 歩のhash key(盤上のみ)
-    HASH_KEY pawnKey;
+    Key pawnKey;
 
 	// 小駒(香、桂、銀、金 とその成り駒)によるhash key
 	// 📝 チェスだとKnight, Bishop。
-    HASH_KEY minorPieceKey;
+    Key minorPieceKey;
 
 	// 歩以外の駒によるhash key(盤上のみ)
-    HASH_KEY nonPawnKey[COLOR_NB];
+    Key nonPawnKey[COLOR_NB];
 #endif
 
 #if STOCKFISH
@@ -83,7 +72,7 @@ struct StateInfo {
     int rule50;
 #endif
 
-	// null moveを越えずに遡り可能な手数
+	// 遡り可能な手数(previousポインタを用いて局面を遡るときに用いる)
 	int pliesFromNull;
 
 #if STOCKFISH
@@ -93,31 +82,23 @@ struct StateInfo {
     int continuousCheck[COLOR_NB];
 #endif
 
-#if defined(EVAL_SFNN) && defined(NNUE_SFNN_PROGRESS_BUCKETS) && NNUE_SFNN_PROGRESS_BUCKETS != 1
-	// NNUE progress bucket用の進行度計算キャッシュ。
-	HASH_KEY nnue_progress_key;
-	int64_t nnue_progress_sum;
-	Square nnue_progress_sq_bk;
-	Square nnue_progress_sq_wk;
-	bool nnue_progress_valid;
-#endif
-
 
 	// 📌 ここまではdo_move()のなかでmemcpy()でコピーされる 📌
+
 
 	// Not copied when making a move (will be recomputed anyhow)
 	// 指し手で局面を進めるときにコピーされない(なんにせよ再計算される)
 
 #if STOCKFISH
-	HASH_KEY        key;
+	Key        key;
 #else
 	// 盤面(盤上の駒)と手駒に関するhash key
 	// 直接アクセスせずに、hand_key()、board_key(),key()を用いること。
 
 	// 💡 board_keyはZobrist::psqをxorしていく。hand_keyはZobrist::handを加算していく。key = board_key ^ hand_key。
 
-	HASH_KEY board_key;
-    HASH_KEY hand_key;
+	Key board_key;
+    Key hand_key;
 
 	// この局面のハッシュキー
 	// ※　次の局面にdo_move()で進むときに最終的な値が設定される
@@ -129,15 +110,28 @@ struct StateInfo {
 		盤面が同じで手駒だけ損している局面(劣等局面)を検出するためには、
 		同一の盤面であるかを高速に調べる必要があり、それには盤面のhash keyが必要となる。
 		それがboard_keyである。
+
+		⚠ KeyからKey64(64bit key)が欲しい場合、
+		    暗黙の変換子が定義されているので単にKey64へcastすると良い。
 	*/
 
-	HASH_KEY key() const { return board_key ^ hand_key; }
+	Key key() const { return board_key ^ hand_key; }
 
 #endif
 
 	// 現局面で手番側に対して王手をしている駒のbitboard
 	Bitboard checkersBB;
 
+	// 一つ前の局面に遡るためのポインタ。
+	// この値としてnullptrが設定されているケースは、
+	// 1) root node
+	// 2) 直前がnull move
+	// のみである。
+	// 評価関数を差分計算するときに、
+	// 1)は、compute_eval()を呼び出して差分計算しないからprevious==nullで問題ない。
+	// 2)は、このnodeのEvalSum sum(これはdo_move_null()でコピーされている)から
+	//   計算出来るから問題ない。
+	StateInfo* previous;
 
 	// 動かすと手番側の王に対して空き王手になるかも知れない駒の候補
 	// チェスの場合、駒がほとんどが大駒なのでこれらを動かすと必ず開き王手となる。
@@ -188,7 +182,7 @@ struct StateInfo {
 
 	// --- evaluate
 
-#if defined(USE_MATERIAL_VALUE)
+#if defined(USE_PIECE_VALUE)
         // この局面での評価関数の駒割
         Value materialValue;
 #endif
@@ -203,8 +197,170 @@ struct StateInfo {
 
 #endif
 
+#if defined(EVAL_NNUE)
+	Eval::NNUE::Accumulator accumulator;
+#endif
 
-#if defined(USE_EVAL_LIST) && !defined(EVAL_NNUE)
+#if defined(EVAL_P2NNUE)
+	// p2nnue 差分計算用 FT/PSQT accumulator(do_move でコピーされない領域)。
+	// アーキの FT_DIM に合わせて確保(p2nnue.cpp 側で一致を static_assert)。
+	// computed[persp] が false なら遅延再計算。
+#if defined(P2_ARCH_1280)
+	static constexpr int P2_FT_DIM = 1280;
+#elif defined(P2_ARCH_512)
+	static constexpr int P2_FT_DIM = 512;
+#elif defined(P2_ARCH_768T) || defined(P2_ARCH_768)
+	static constexpr int P2_FT_DIM = 768;
+#elif defined(P2_ARCH_1024) || defined(P2_ARCH_1024T)
+	static constexpr int P2_FT_DIM = 1024;
+#elif defined(P2_ARCH_1536)
+	// 2026-11-03: 幅 1536 (既定の #else も 1536 なので値は同じだが、 意図を明示して
+	//   将来 #else が変わっても追従するようにしておく)。
+	static constexpr int P2_FT_DIM = 1536;
+#else
+	static constexpr int P2_FT_DIM = 1536;
+#endif
+#if defined(P2_FT_I32)
+	// P2_FT_I32 (2026-11-18): FT の累積器を i32 にする (重みは k 倍細かい刻みの i16、 eval/p2nnue/p2nnue.cpp の FT_KS の注記)。
+	//   [p2_acc, dirtyPiece) の非コピー領域の先頭のまま (do_move の memcpy は offsetof(p2_acc) まで)。 64 B 整列。
+	alignas(64) std::int32_t p2_acc[2][P2_FT_DIM];
+#elif defined(P2_SI_ALIGN64)
+	// **案 3a (設計 fable 2026-11-06)**: 2 KB を alignas(32) で置くと 64 B line を
+	//   **33 本**跨ぐ (先頭が 32 B 境界に落ちると前後が半端な line になる)。 64 で 32 本。
+	//   🚨値は変わらないので **bit-exact** (SIMD は 32 B 整列を要求するので 64 でも可)。
+	alignas(64) std::int16_t p2_acc[2][P2_FT_DIM];
+#else
+	alignas(32) std::int16_t p2_acc[2][P2_FT_DIM];
+#endif
+#if defined(P2_SI_PACK)
+	// **案 3c (設計 fable 2026-11-06)**: do_move / do_null_move が**毎回書く小物**を 1 line に集める。
+	//   元は p2_psqt / p2_threat_acc / p2_dirty_threats という大きな配列の間に散っていて、
+	//   1 node あたり **4 本の line** を touch していた (実測 offsetof: 4640 / 4928 / 5278 / 5280)。
+	//   探索スタックは 深さ 30 x 5.3 KB = 160 KB で **L2 (256 KB) とほぼ同じ大きさ**なので、
+	//   touch する line を減らすと history / TT の line との取り合いが緩む。
+	//   🚨**配置は [p2_acc, dirtyPiece) の非コピー領域の中**に収める (do_null_move の 2 区間
+	//     memcpy が除外する範囲を変えない = 従来と同じ値になる = bit-exact)。
+	float                    p2_prog_sum;
+	std::uint16_t            p2_dt_count;
+	bool                     p2_computed[2];
+	bool                     p2_prog_computed;
+	bool                     p2_threat_valid[2];
+	std::uint8_t             p2_threat_group[2];
+	std::uint8_t             p2_threat_rep_count[2];
+	std::uint8_t             p2_dt_state;
+#endif
+	// LayerStack 出力 bucket 数(p2nnue.cpp の NUM_BUCKETS と一致必須)。
+	// P8H2(-DP2_LSMODE_P8H2)は進行度8×持駒2=16、それ以外(Legacy progress8 / P4H2)は 8。
+	// ★これを 8 固定にすると P8H2 で get_layer_stack_index が返す 0..15 の書き込みが
+	//   隣接フィールド(p2_computed/p2_prog_sum/p2_threat_acc)を破壊し、対局中の
+	//   do_move チェーンで state 破損 → 間欠 crash を起こす。
+#if defined(P2_LSMODE_P8H2) || defined(P2_LSMODE_PROGREGIME)
+#define P2_STATEINFO_NUM_BUCKETS 16
+#else
+#define P2_STATEINFO_NUM_BUCKETS 8
+#endif
+	static constexpr int P2_NUM_BUCKETS = P2_STATEINFO_NUM_BUCKETS;
+	std::int32_t             p2_psqt[2][P2_NUM_BUCKETS];
+#if !defined(P2_SI_PACK)
+	bool                     p2_computed[2];
+#endif
+#if defined(P2_OPN)
+	// OPN (序盤帯専用の副 net、 2026-11-14) の acc が計算済みか (視点ごと)。 do_move / do_null_move で false にする。
+	//   p2_computed の隣に置く (do_move が既に書いている line なので、 書き込む line は増えない)。
+	//   bool 2 個は p2_prog_sum (float) の前の詰め物に収まり、 後ろの欄の offset は変わらない。
+	bool                     p2_opn_computed[2];
+#endif
+#if defined(P2_FABLE_PROBE)
+	// 2026-11-11 (PRIMEW): HalfKA acc を priming (evaluate_with_no_return) で作ったか。
+	//   0 = evaluate で作った / 1 = priming で作り未使用 / 2 = priming で作り子の base に採用された。
+	//   🚨probe ビルドだけ。 本番の StateInfo の配置は変わらない。
+	std::uint8_t             p2_prime_probe[2];
+#endif
+	// progress8kpabs バケット選択用の重み付き和(差分更新)。
+#if !defined(P2_SI_PACK)
+	float                    p2_prog_sum;
+#endif
+#if !defined(P2_SI_PACK)
+	bool                     p2_prog_computed;
+#endif
+
+	// threat 入力のみの寄与を保持する incremental accumulator(HalfKA と分離)。
+	// eval 時 forward 入力 = p2_acc[persp] + p2_threat_acc[persp]。
+	// ★配置は [p2_acc, dirtyPiece) の非コピー領域内(do_null_move の 2 区間 memcpy が
+	//   自然に除外する)。do_move/do_null_move 直後に valid=false を明示(スタック再利用の
+	//   stale valid=true 防止)。
+	// 2026-09-09: threat accumulator の**出力幅**を P2_THREAT_OUT に絞れるようにする。
+	//   full threat の NPS 税 -32.6% の内訳は 列挙 -17.2% / accumulator -18.5% (実測)。
+	//   accumulator 側は「36 行 x 幅」の i16 加減算なので幅に比例する。 1024 -> 256 で
+	//   行が 512B -> 128B (2 キャッシュライン) になり L2 常駐化して 8 倍以上効く
+	//   (マイクロベンチで 90 -> 10 tsc/行)。 forward では acc[0..K) にだけ threat を足す。
+	//   pairwise 積 clamp(a[j]) * clamp(a[j+half]) の構造は保たれる (j<K の側だけ threat 入り)。
+	//   K = P2_FT_DIM で従来と完全一致 (入れ子モデル)。
+#if defined(P2_THREAT_OUT)
+	static constexpr int P2_THREAT_ACC_DIM = P2_THREAT_OUT;
+#else
+	static constexpr int P2_THREAT_ACC_DIM = P2_FT_DIM;
+#endif
+#if defined(P2_SI_ALIGN64)
+	// **案 3a (設計 fable 2026-11-06)**: 2 KB を alignas(32) で置くと 64 B line を
+	//   **33 本**跨ぐ (先頭が 32 B 境界に落ちると前後が半端な line になる)。 64 で 32 本。
+	//   🚨値は変わらないので **bit-exact** (SIMD は 32 B 整列を要求するので 64 でも可)。
+	alignas(64) std::int16_t p2_threat_acc[2][P2_THREAT_ACC_DIM];
+#else
+	alignas(32) std::int16_t p2_threat_acc[2][P2_THREAT_ACC_DIM];
+#endif
+#if !defined(P2_SI_PACK)
+	bool                     p2_threat_valid[2];
+#endif
+	// 2026-10-07 (S2 §3.1): この acc を確定したときの threat 表の群 (bucket -> group)。
+	//   0xFF = 未設定。 群化 net では群が違う祖先を差分の基点にすると表が合わないので、
+	//   base 採用の条件に `base->p2_threat_group[persp] == 現局面の群` を要求する。
+	//   0xFF は群 id (0..threat_groups-1 <= 253) と衝突しないので未設定は必ず弾かれる。
+	//   ★配置は [p2_acc, dirtyPiece) の非コピー領域内 (do_move / do_null_move の memcpy 区間外)。
+#if !defined(P2_SI_PACK)
+	std::uint8_t             p2_threat_group[2];
+#endif
+	// valid時のThreat accumulator実体。profile 11でdirty差分が特徴空間へ写らないとき、
+	// 生存中の祖先StateInfoを共有して2×FT_DIMコピーを避ける。
+	const StateInfo*          p2_threat_source[2];
+        // profile 12(EnemyOnlyRep8)の上位Threat行。active全体は保持せず、
+        // 親の代表行がSUBされるときだけ安全にfull再計算へフォールバックする。
+        static constexpr int     P2_THREAT_REP_CAP = 8;
+        std::int32_t             p2_threat_rep_idx[2][P2_THREAT_REP_CAP];
+#if !defined(P2_SI_PACK)
+        std::uint8_t             p2_threat_rep_count[2];
+#endif
+
+	// Stockfish 方式 dirty-threat(2026-07-21): do_move で「親→子で変化した threat pair」
+	// の生タプル列をここに積む(視点非依存)。ensure_threat は valid な祖先まで遡って
+	// chain 適用するため、親 occupancy の再現が不要で chain 長に制限がない。
+	// p2_dt_state: 0=未生成(lazy) / 1=生成済 / 2=生成不可(overflow・threat無効)。
+	//   0 と 2 の ply は chain を通せないのでそこで打ち切り full にする。
+	// ★配置は [p2_acc, dirtyPiece) の非コピー領域内(do_move / do_null_move の memcpy 区間外)。
+	// P2_DT_CAP: 実測(startpos / 中盤局面 各 1M nodes)で 1 手あたりのタプル数は
+	//   平均 5.6-6.2、最大 25。64 で overflow 率 0(超えても full にフォールバックするので安全)。
+	//   StateInfo は探索スタック上に ply 数ぶん積まれるので、無駄に大きくしない。
+	static constexpr int P2_DT_CAP = 64;
+	Eval::P2DirtyThreat p2_dirty_threats[P2_DT_CAP];
+#if !defined(P2_SI_PACK)
+	std::uint16_t       p2_dt_count;
+#endif
+#if !defined(P2_SI_PACK)
+	std::uint8_t        p2_dt_state;
+#endif
+#if defined(P2_OPN)
+	// OPN の FT accumulator (i16、 幅は net から読む。 ここは上限 P2_OPN_FT_MAX ぶん確保)。 2026-11-14
+	//   ★配置は [p2_acc, dirtyPiece) の非コピー領域の末尾 (do_move / do_null_move の memcpy 区間外)。
+	//   p2_opn_computed[c] が false なら未計算 (評価時に祖先から差分 / Finny で作る)。
+#if !defined(P2_OPN_FT_MAX)
+#define P2_OPN_FT_MAX 2048
+#endif
+	static constexpr int P2_OPN_FT_DIM = P2_OPN_FT_MAX;
+	alignas(64) std::int16_t p2_opn_acc[2][P2_OPN_FT_DIM];
+#endif
+#endif
+
+#if defined (USE_EVAL_LIST)
 	// 評価値の差分計算の管理用
 	Eval::DirtyPiece dirtyPiece;
 #endif
@@ -220,9 +376,48 @@ struct StateInfo {
 #endif
 };
 
+#if defined(EVAL_P2NNUE)
+// ===== StateInfo の ABI (bucket 数) を link 時に突き合わせる =====
+// 2026-10-08: 全翻訳単位が同じ P2_STATEINFO_NUM_BUCKETS で compile されていることを保証する。
+//   なぜ必要か: bucket 数は sizeof(StateInfo) を変える。 古い .o が 1 つ混ざると
+//   StateInfo 配列の stride が食い違い、 p2nnue 側の p2_psqt[2][16] 書き込みが
+//   隣の StateInfo を踏み越えて探索中にメモリを壊す (readyok は通るので気づけない)。
+//   実際に 2026-10-07 の tsumugi_regime_on.exe がこれで 48 局すべて落ちた
+//   (ビルドの clean が無言で失敗し、 position.o だけ 8 bucket のまま残った)。
+//   p2nnue.cpp の static_assert は**自分の翻訳単位しか守れない**ので足りない。
+// 守るべき不変条件:
+//   ①この関数の**シンボル名に bucket 数が入る**こと (P2_ABI_CAT で連結)。
+//   ②定義は position.cpp にただ 1 つ。 参照は p2nnue.cpp の load()。
+//   → 食い違えば「定義されていないシンボル」で link が必ず失敗する。
+//     さらに load() で値も照合するので、 参照が最適化で消えることもない。
+#define P2_ABI_CAT2(a, b) a##b
+#define P2_ABI_CAT(a, b) P2_ABI_CAT2(a, b)
+#if defined(P2_OPN)
+// 2026-11-14 (OPN): StateInfo に OPN の acc (幅 P2_OPN_FT_MAX) が載るので、 幅もシンボル名に入れる
+//   (-DP2_OPN の有無・幅の違う .o が混ざると link が失敗する)。 返す値は従来どおり bucket 数。
+#define P2_STATEINFO_ABI_TAG \
+	P2_ABI_CAT(P2_ABI_CAT(p2_stateinfo_abi_num_buckets_, P2_STATEINFO_NUM_BUCKETS), P2_ABI_CAT(_opn, P2_OPN_FT_MAX))
+#else
+#define P2_STATEINFO_ABI_TAG \
+	P2_ABI_CAT(p2_stateinfo_abi_num_buckets_, P2_STATEINFO_NUM_BUCKETS)
+#endif
+extern "C" int P2_STATEINFO_ABI_TAG();
+#endif
+
 // --------------------
 //     局面の定数
 // --------------------
+
+/// A list to keep track of the position states along the setup moves (from the
+/// start position to the position just before the search starts). Needed by
+/// 'draw by repetition' detection. Use a std::deque because pointers to
+/// elements are not invalidated upon list resizing.
+
+// setup moves("position"コマンドで設定される、現局面までの指し手)に沿った局面の状態を追跡するためのStateInfoのlist。
+// 千日手の判定のためにこれが必要。std::dequeを使っているのは、StateInfoがポインターを内包しているので、resizeに対して
+// 無効化されないように。
+using StateList    = std::deque<StateInfo>;
+using StateListPtr = std::unique_ptr<StateList>;
 
 // このエラーは、局面設定時にエンジンが扱えない局面・指し手を検出した時に返す。
 // 特に不正な指し手を通常手として進めて盤面を壊すようなケースを避けるために用いる。
@@ -234,14 +429,11 @@ struct PositionSetError : std::runtime_error {
 //       盤面
 // --------------------
 
+#if defined(USE_SFEN_PACKER)
+
 // packされたsfen
 struct PackedSfen {
 	u8 data[32];
-
-	// 盤面を180度回転し、先後と手番を入れ替える。
-	// SFEN文字列やPosition::set()を経由せず、packed sfen上で変換する。
-	void flip();
-	PackedSfen flipped() const;
 
 	// 手番を返す。
 	Color color() const {
@@ -297,16 +489,12 @@ struct PackedSfenHash {
 		return s;
 	}
 };
+#endif
 
-// Position class stores information regarding the board representation as
-// pieces, side to move, hash keys, castling info, etc. Important methods are
-// do_move() and undo_move(), used by the search to update node info when
-// traversing the search tree.
-// Positionクラスは、駒の配置、手番、ハッシュキーなどの局面情報を保持する。
-// do_move()とundo_move()は、探索木をたどる際に局面情報を更新する重要なメソッドである。
-// 将棋では手駒や入玉ルールも保持する。
-class Position {
-   public:
+// 盤面
+class Position
+{
+public:
     // Positionで用いるZobristテーブルの初期化
     // 起動時に呼び出す。
     static void init();
@@ -327,15 +515,19 @@ class Position {
     // -----------------------
 
     // sfen文字列で盤面を設定する
-    // StateInfoはPosition内部に保持する。スレッド間のコピーはcopy_state_infos()を使う。
+    /* 📓 StateInfoとは？
+
+		局面を遡るために、rootまでの局面の情報が必要であるから、それを引数のsiで渡してやる。
+	*/
 #if STOCKFISH
-	std::optional<PositionSetError> set(const std::string& fenStr, bool isChess960);
-    std::optional<PositionSetError> set(const std::string& code, Color c);
+	Position& set(const std::string& fenStr,bool isChess960, StateInfo* si);
+    Position& set(const std::string& code, Color c, StateInfo* si);
 #else
-    std::optional<PositionSetError> set(const std::string& sfenStr);
+    std::optional<PositionSetError> set(const std::string& sfenStr, StateInfo* si);
 
 	// 平手の初期盤面を設定する。
-    std::optional<PositionSetError> set_hirate() { return set(StartSFEN); }
+    // siについては、上記のset()にある説明を読むこと。
+    std::optional<PositionSetError> set_hirate(StateInfo* si) { return set(StartSFEN, si); }
 #endif
 
 	// 局面のsfen文字列を取得する
@@ -399,6 +591,13 @@ class Position {
 		return m.moved_after_piece();
 	}
 
+	// 指し手mで移動させた駒(成りの指し手である場合は、成った後の駒)
+    // 💡 Stockfishの探索部で用いているので、それと互換性を保つために用意。
+    // 📝 Stockfishでは移動させた駒(moved_piece_before())を期待しているが、
+	//     moved_piece_after()にしたほうが強いっぽいので、やねうら王では
+	//     moved_piece()は、moved_piece_after()のaliasとする。
+    Piece moved_piece(Move m) const;
+
 
 	// 定跡DBや置換表から取り出したMove16(16bit型の指し手)を32bit化する。
 	// is_ok(m) == false ならば、mをそのまま返す。
@@ -417,18 +616,7 @@ class Position {
 	// 
 	// ※　これを MAX_PLY に設定すると初手からのチェックになるが、将棋はチェスと異なり
 	// 　　終局までの平均手数がわりと長いので、そこまでするとスピードダウンしてR40ほど弱くなる。
-	// Reject a window that could overwrite the root history during a full-depth search.
-    // 最大深さの探索でルート以前の履歴を上書きする長さは拒否する。失敗時は設定を維持する。
-    bool set_max_repetition_ply(int ply) {
-        if (ply < 0)
-            return false;
-#if !defined(YANEURAOU_MATE_ENGINE) && !defined(TANUKI_MATE_ENGINE)
-        if (usize(ply) + MAX_PLY >= MAX_HIST)
-            return false;
-#endif
-        max_repetition_ply = ply;
-        return true;
-    }
+	void set_max_repetition_ply(int ply){ max_repetition_ply = ply;}
 
 	// -----------------------
     // Position representation
@@ -462,8 +650,8 @@ class Position {
     Bitboard pieces(Color c, PieceTypes... pts) const;
 
 	// sのマスにある駒を返す。
-    // 💡 s == SQ_NBの時、NO_PIECEが返ることは保証されている。
-    Piece piece_on(Square s) const;
+    // 💡 sq == SQ_NBの時、NO_PIECEが返ることは保証されている。
+    Piece piece_on(Square sq) const;
 
 	// (盤上の)駒の配列をもらう。
 #if STOCKFISH
@@ -516,22 +704,22 @@ class Position {
     // -----------------------
 
 	// 現局面で王手している駒
-	Bitboard checkers() const;
+	Bitboard checkers() const { return st->checkersBB; }
 
 	// c側の玉に対してpinしている駒(その駒をc側の玉との直線上から動かしたときにc側の玉に王手となる)
-	Bitboard blockers_for_king(Color c) const;
+	Bitboard blockers_for_king(Color c) const { return st->blockersForKing[c]; }
 
 	// ↑のtemplate版
 	template <Color C>
 	Bitboard blockers_for_king() const { return st->blockersForKing[C]; }
 
 	// 現局面で駒Ptを動かしたときに王手となる升を表現するBitboard
-	Bitboard check_squares(PieceType pt) const;
+	Bitboard check_squares(PieceType pt) const { ASSERT_LV3(pt!= NO_PIECE_TYPE && pt < PIECE_TYPE_NB); return st->checkSquares[pt]; }
 
 	// c側の玉に対してpinしている駒
 	// ※ pinされているではなく、pinしているということに注意。
 	// 　すなわち、pinされている駒が移動した時に、この大駒によって王が素抜きにあう。
-	Bitboard pinners(Color c) const;
+	Bitboard pinners(Color c) const { return st->pinners[c]; }
 
 #if !STOCKFISH
 	// c側の玉に対して、指し手mが空き王手となるのか。
@@ -552,8 +740,8 @@ class Position {
 	// occが指定されていなければ現在の盤面において。occが指定されていればそれをoccupied bitboardとして。
 	// sq == SQ_NBでの呼び出しは合法。Bitboard(ZERO)が返る。
 
-	Bitboard attackers_to(Square s) const;
-    Bitboard attackers_to(Square s, const Bitboard& occupied) const;
+	Bitboard attackers_to(Square sq) const { return attackers_to(sq, pieces()); }
+    Bitboard attackers_to(Square sq, const Bitboard& occ) const;
 
 #if STOCKFISH
     // これはcastlingの判定のためのもの。将棋では使わない。
@@ -574,7 +762,7 @@ class Position {
     }
 
     template<Color C>
-    Bitboard attackers_to(Square s, const Bitboard& occupied) const;
+    Bitboard attackers_to(Square sq, const Bitboard& occ) const;
 
     // 打ち歩詰め判定に使う。王に打ち歩された歩の升をpawn_sqとして、c側(王側)のpawn_sqへ利いている駒を列挙する。香が利いていないことは自明。
     Bitboard attackers_to_pawn(Color c, Square pawn_sq) const;
@@ -615,8 +803,50 @@ class Position {
 	// c側の駒Ptの利きのある升を表現するBitboardを返す。(MovePickerで用いている。)
 	template<Color C , PieceType Pt> Bitboard attacks_by() const;
 
-    // Properties of moves
-    // 指し手の性質。
+    // -----------------------
+	// Doing and undoing moves
+	// 局面を進める/戻す
+    // -----------------------
+
+	// 指し手で盤面を1手進める
+	// m = 指し手。mとして非合法手を渡してはならない。
+	// info = StateInfo。局面を進めるときに捕獲した駒などを保存しておくためのバッファ。
+	// このバッファはこのdo_move()の呼び出し元の責任において確保されている必要がある。
+	// givesCheck = mの指し手によって王手になるかどうか。
+	// この呼出までにst.checkInfo.update(pos)が呼び出されている必要がある。
+    /*
+		📓 Stockfish 17.1からTTのprefetchのために引数でTranspositionTable*を
+			渡すようになったが、やねうら王では、このclassをPosition classと癒着したくない。
+			そこで、第四引数をtemplate T*にするが、ここに何も指定しないということもできてほしい。
+	*/
+#if STOCKFISH
+    void do_move(Move m, StateInfo& newSt, bool givesCheck, const TranspositionTable* tt);
+#else
+	template <typename T = void>
+    void do_move(Move m, StateInfo& newSt, bool givesCheck, const T* tt = nullptr);
+#endif
+
+	// 💡 上記のdo_move()にはgivesCheckも渡さないといけないが、
+	//     mで王手になるかどうかがわからないときはこちらの関数を用いる。
+    template<typename T = void>
+    void do_move(Move m, StateInfo& newSt, const T* tt = nullptr) {
+        do_move(m, newSt, gives_check(m), tt);
+    }
+
+	// do_move()で進めた局面を1手戻す。
+	void undo_move(Move m);
+
+	// null move用のdo_move()
+	// 📝 Tのところには、TranspositionTable ttを渡すことができる。
+
+	void do_null_move(StateInfo& st);
+
+	template<typename T>
+    void do_null_move(StateInfo& st, const T& tt);
+
+	// null move用のundo_move()
+	void undo_null_move();
+
 	// --- legality(指し手の合法性)のチェック
 
 	// 生成した指し手(CAPTUREとかNON_CAPTUREとか)が、合法であるかどうかをテストする。
@@ -633,7 +863,6 @@ class Position {
 	// 歩の不成に関しては、この関数は常にtrueを返す。(合法扱い)
 	bool legal(Move m) const;
 
-#if !STOCKFISH
 	// mがpseudo_legalな指し手であるかを判定する。
     /*
 	    📓　pseudo_legalとは
@@ -674,86 +903,6 @@ class Position {
 	// これをチェックするための関数。成れる条件を満たしていない場合、falseが返る。
 	bool legal_promote(Move m) const;
 
-#endif
-
-	// 捕獲する指し手であるか。
-    bool capture(Move m) const;
-
-	// capture_or_pawn_promotion()みたいなもの。
-	/*
-	    📓 Stockfishでは、この関数は、「捕獲する指し手かQUEENにpromoteする
-			指し手かのどちらかであるか」を判定する。
-
-			Stockfishとの互換性のために用意。
-			やねうら王では、capture()と同義。
-	*/
-    bool capture_stage(Move m) const;
-
-	// 指し手mで王手になるかを判定する。
-	// 前提条件 : 指し手mはpseudo-legal(擬似合法)の指し手であるものとする。
-	// (つまり、mのfromにある駒は自駒であることは確定しているものとする。)
-	bool gives_check(Move m) const;
-
-	// 指し手mで移動させた駒(成りの指し手である場合は、成った後の駒)
-    // 💡 Stockfishの探索部で用いているので、それと互換性を保つために用意。
-    // 📝 Stockfishでは移動させた駒(moved_piece_before())を期待しているが、
-	//     moved_piece_after()にしたほうが強いっぽいので、やねうら王では
-	//     moved_piece()は、moved_piece_after()のaliasとする。
-    Piece moved_piece(Move m) const;
-
-	// 直前の指し手によって捕獲した駒。先後の区別あり。
-	Piece captured_piece() const;
-
-    // -----------------------
-	// Doing and undoing moves
-	// 局面を進める/戻す
-    // -----------------------
-
-	// 指し手で盤面を1手進める
-	// m = 指し手。mとして非合法手を渡してはならない。
-	// StateInfoはPosition内部のリングバッファに保存する。
-	// givesCheck = mの指し手によって王手になるかどうか。
-	// 王手情報は局面設定や直前のdo_move()/do_null_move()で更新されている。
-    /*
-		📓 Stockfish 17.1からTTのprefetchのために引数でTranspositionTable*を
-			渡すようになったが、やねうら王では、このclassをPosition classと癒着したくない。
-			そこで、TTの引数をtemplate T*にするが、ここに何も指定しないということもできてほしい。
-	*/
-#if STOCKFISH
-    void do_move(Move                   m,
-                 bool                   givesCheck,
-                 Dirties&               dirties,
-                 const SharedHistories* worker = nullptr);
-#else
-    // historyは省略可能。探索で次局面の履歴を先読みするときだけ渡す。
-	template <typename T = void>
-    void do_move(Move m, bool givesCheck, const T* tt = nullptr,
-                 const SharedHistories* history = nullptr);
-#if defined(EVAL_SFNN) || defined(EVAL_NNUE)
-    template <typename T = void>
-    void do_move(Move m, bool givesCheck, Eval::NNUE::Dirties& dirties,
-                 const T* tt = nullptr, const SharedHistories* history = nullptr);
-#endif
-#endif
-
-	// 💡 上記のdo_move()にはgivesCheckも渡さないといけないが、
-	//     mで王手になるかどうかがわからないときはこちらの関数を用いる。
-    void do_move(Move m) { do_move(m, gives_check(m)); }
-
-	// do_move()で進めた局面を1手戻す。
-	void undo_move(Move m);
-
-	// null move用のdo_move()
-	// 📝 Tのところには、TranspositionTable ttを渡すことができる。
-
-	void do_null_move();
-
-	template<typename T>
-    void do_null_move(const T& tt);
-
-	// null move用のundo_move()
-	void undo_null_move();
-
 	// --- Evaluation
 
 #if defined(USE_EVAL_LIST)
@@ -761,11 +910,13 @@ class Position {
 	const Eval::EvalList* eval_list() const { return &evalList; }
 #endif
 
+#if defined (USE_SEE)
 	// 指し手mのsee(Static Exchange Evaluation : 静的取り合い評価)において
 	// v(しきい値)以上になるかどうかを返す。
 	// see_geのgeはgreater or equal(「以上」の意味)の略。
-	SYSV_ABI bool see_ge(Move m, int threshold = 0) const;
+	bool see_ge(Move m, Value threshold = VALUE_ZERO) const;
 
+#endif
 
     // -----------------------
     // Accessing hash keys
@@ -775,18 +926,19 @@ class Position {
 	// 📝 StateInfoの同名のメンバーへの簡易アクセス。
 	// 💡 USE_PARTIAL_KEYがdefineされていない時は、key()以外は使えない。
 
-    HASH_KEY key() const;
-    HASH_KEY material_key() const;
-    HASH_KEY pawn_key() const;
-    HASH_KEY minor_piece_key() const;
-    HASH_KEY non_pawn_key(Color c) const;
+    Key key() const;
+    Key material_key() const;
+    Key pawn_key() const;
+    Key minor_piece_key() const;
+    Key non_pawn_key(Color c) const;
+    Key hand_key() const;   // 将棋用: 手駒のみの Zobrist(StateInfo::hand_key)。持ち駒構成 correction 用。
 
 #if !STOCKFISH
 	// ある指し手を指した後のhash keyを返す。
 	// 将棋だとこの計算にそこそこ時間がかかるので、通常の探索部でprefetch用に
 	// これを計算するのはあまり得策ではないが、詰将棋ルーチンでは置換表を投機的に
 	// prefetchできるとずいぶん速くなるのでこの関数を用意しておく。
-	HASH_KEY key_after(Move m) const;
+	Key key_after(Move m) const;
 #endif
 
     // -----------------------
@@ -796,9 +948,6 @@ class Position {
 
     // 現局面の手番を返す。
     Color side_to_move() const;
-
-    // 最後のnull move以降の手数を返す。
-    int plies_from_null() const;
 
     // (将棋の)開始局面からの手数を返す。
     // 平手の開始局面なら1が返る。(0ではない)
@@ -823,7 +972,9 @@ class Position {
     // 2. ENABLE_QUICK_DRAWがdefineされていない時(正確に千日手の判定を行いたい時)
     // 遡る手数は、set_max_repetition_ply()で設定された手数だけ遡る。
     // ply         : rootからの手数。3回目の同一局面の出現まではrootよりは遡って千日手と判定しない。4回目は判定する。
-    RepetitionState is_repetition(int ply = 16) const;
+    // infrep_history : true なら USI option P2InferiorRepHistory が on のとき優等/劣等局面を root より前の履歴とも比較して返す
+    //                  (劣等は ply >= 2 のみ)。 探索本体 (search/qsearch) だけが true で呼ぶ。 mate 等は既定の false = 旧条件。
+    RepetitionState is_repetition(int ply = 16, bool infrep_history = false) const;
 
     // is_repetition()の、千日手が見つかった時に、現局面から何手遡ったかを返すバージョン。
     // REPETITION_NONEではない時は、found_plyにその値が返ってくる。	// ※　定跡生成の時にしか使わない。
@@ -853,27 +1004,7 @@ class Position {
 
     // 現在の局面に対応するStateInfoを返す。
     // たとえば、state()->capturedPieceであれば、前局面で捕獲された駒が格納されている。
-    StateInfo* state() const;
-
-    static constexpr usize MAX_HIST = 512;
-    // Copy only the history needed by shogi repetition detection.
-    // 千日手判定に必要な過去の履歴を、自分の領域へコピーする。
-    void copy_state_infos(const Position& other);
-    void copy_from(const Position& other);
-    // Used for repeated UCT rollouts after copy_from(), without copying history again.
-    // copy_from()後のUCT反復では、履歴を再コピーせず盤面と履歴の位置だけ戻す。
-    void reset_to_root(const Position& root);
-    StateInfo* previous_state(usize distance = 1) const {
-        assert(distance <= stateIdx);
-#if !defined(YANEURAOU_MATE_ENGINE) && !defined(TANUKI_MATE_ENGINE)
-        assert(distance < MAX_HIST);
-#endif
-#if defined(YANEURAOU_MATE_ENGINE) || defined(TANUKI_MATE_ENGINE)
-        return const_cast<StateInfo*>(&stateInfos[stateIdx - distance]);
-#else
-        return const_cast<StateInfo*>(&stateInfos[(stateIdx - distance) & (MAX_HIST - 1)]);
-#endif
-    }
+    StateInfo* state() const { return st; }
 
 	// put_piece()やremove_piece()を用いたときは、最後にupdate_bitboards()を呼び出して
     // bitboardの整合性を保つこと。
@@ -952,6 +1083,11 @@ class Position {
 	Bitboard pinned_pieces(Square from, Square to) const;
 
 
+	// 指し手mで王手になるかを判定する。
+	// 前提条件 : 指し手mはpseudo-legal(擬似合法)の指し手であるものとする。
+	// (つまり、mのfromにある駒は自駒であることは確定しているものとする。)
+	bool gives_check(Move m) const;
+
 	// 手番側の駒をfromからtoに移動させると素抜きに遭うのか？
 	bool discovered(Square from, Square to, Square ourKing, const Bitboard& pinned) const
 	{
@@ -965,6 +1101,9 @@ class Position {
 
 	// 現局面で指し手がないかをテストする。指し手生成ルーチンを用いるので速くない。探索中には使わないこと。
 	bool is_mated() const;
+
+	// 直前の指し手によって捕獲した駒。先後の区別あり。
+	Piece captured_piece() const { return st->capturedPiece; }
 
 	// 捕獲する指し手か、成りの指し手であるかを判定する。
 	bool capture_or_promotion(Move m) const { return m.is_promote() || capture(m); }
@@ -990,6 +1129,19 @@ class Position {
 		return (m.is_promote() && (pr == PAWN || pr == BISHOP || pr == ROOK)) || capture(m);
 	}
 
+	// 捕獲する指し手であるか。
+    bool capture(Move m) const;
+
+	// capture_or_pawn_promotion()みたいなもの。
+	/*
+	    📓 Stockfishでは、この関数は、「捕獲する指し手かQUEENにpromoteする
+			指し手かのどちらかであるか」を判定する。
+
+			Stockfishとの互換性のために用意。
+			やねうら王では、capture()と同義。
+	*/
+    bool capture_stage(Move m) const;
+
 	// 入玉時の宣言勝ち
     /*
 		📓 宣言勝ちの条件を満たしているとき、MOVE_WINや、玉を移動する指し手(トライルール時)が返る。
@@ -1008,6 +1160,7 @@ class Position {
     }
 
 	// -- sfen化ヘルパ
+#if defined(USE_SFEN_PACKER)
   // packされたsfenを得る。引数に指定したバッファに返す。
   // gamePlyはpackに含めない。
 	void sfen_pack(PackedSfen& sfen);
@@ -1017,13 +1170,14 @@ class Position {
 	static std::string sfen_unpack(const PackedSfen& sfen);
 
 	// ↑sfenを経由すると遅いので直接packされたsfenをセットする関数を作った。
-	// pos.set(sfen_unpack(data)); と等価。
+	// pos.set(sfen_unpack(data),si); と等価。
 	// 渡された局面に問題があって、エラーのときはTools::Result::SomeErrorを返す。
 	// PackedSfenにgamePlyは含まないので復元できない。そこを設定したいのであれば引数で指定すること。
-	Tools::Result set_from_packed_sfen(const PackedSfen& sfen , bool mirror=false , int gamePly_ = 0);
+	Tools::Result set_from_packed_sfen(const PackedSfen& sfen , StateInfo * si , bool mirror=false , int gamePly_ = 0);
 
 	// 盤面と手駒、手番を与えて、そのsfenを返す。
 	static std::string sfen_from_rawdata(Piece board[81], Hand hands[2], Color turn, int gamePly);
+#endif
 
 	// -- 利き
 #if defined(LONG_EFFECT_LIBRARY)
@@ -1074,17 +1228,17 @@ private:
 	void set_state() const;
 
 #if STOCKFISH
-    void set_extra_bitboards() const;
+    void set_check_info() const;
 #else
 	// 王手になるbitboard等を更新する。set_state()とdo_move()から呼び出される。
 	// 🌈 null moveのときは利きの更新を少し端折れるのでフラグを渡すことにした。
 	template <bool doNullMove,Color Us>
-	void set_extra_bitboards() const;
+	void set_check_info() const;
 
 	template <bool doNullMove>
-	void set_extra_bitboards() const
+	void set_check_info() const
 	{
-		sideToMove == BLACK ? set_extra_bitboards<doNullMove, BLACK>() : set_extra_bitboards<doNullMove, WHITE>();
+		sideToMove == BLACK ? set_check_info<doNullMove, BLACK>() : set_check_info<doNullMove, WHITE>();
 	}
 #endif
 
@@ -1098,19 +1252,13 @@ private:
                      Square&           rfrom,
                      Square&           rto,
                      DirtyPiece* const dp = nullptr);
-    template<bool AfterMove = false>
-    HASH_KEY adjust_key50(HASH_KEY k) const;
+    Key  adjust_key50(Key k) const;
 
 #endif
 
 	// do_move()の先後分けたもの。内部的に呼び出される。
     template<Color Us, typename T>
-    void do_move_impl(Move m, bool givesCheck, const T* tt,
-                       const SharedHistories* history
-#if defined(EVAL_SFNN) || defined(EVAL_NNUE)
-                       , Eval::DirtyPiece* dirty
-#endif
-                       );
+    void do_move_impl(Move m, StateInfo& st, bool givesCheck, const T* tt);
 
 	// undo_move()の先後分けたもの。内部的に呼び出される。
     template<Color Us>
@@ -1179,6 +1327,11 @@ private:
     Bitboard castlingPath[CASTLING_RIGHT_NB];
 #endif
 
+	// 現局面に対応するStateInfoのポインタ。
+    // do_move()で次の局面に進むときは次の局面のStateInfoへの参照をdo_move()の引数として渡される。
+    //   このとき、undo_move()で戻れるようにStateInfo::previousに前のstの値を設定しておく。
+    // undo_move()で前の局面に戻るときはStateInfo::previousから辿って戻る。
+    StateInfo* st;
 
 	// 初期局面からの手数(初期局面 == 1)
     int gamePly;
@@ -1204,24 +1357,6 @@ private:
 #endif
 
 #endif
-
-    // State storage is last: copying the board must not copy the entire ring.
-    // 状態の領域は末尾に置き、盤面だけのコピーにリング全体を巻き込まない。
-    // Keep a logical index; mask only when accessing the ring. This also bounds valid history.
-    // 添字は論理的に数え、配列アクセス時だけマスクする。有効な履歴長もこの添字から得る。
-    usize stateIdx = 0;
-    StateInfo* st = nullptr;
-#if defined(YANEURAOU_MATE_ENGINE) || defined(TANUKI_MATE_ENGINE)
-    // Dedicated mate solvers retain unbounded history until their planned rewrite.
-    // 専用詰将棋探索は作り直すまで、深さを制限しない履歴を保持する。
-    std::deque<StateInfo> stateInfos{1};
-#else
-    static_assert(MAX_HIST >= MAX_PLY + 17);
-    StateInfo stateInfos[MAX_HIST];
-#endif
-    void reset_state();
-    StateInfo* push_state();
-    void pop_state();
 };
 
 
@@ -1309,46 +1444,36 @@ inline Square Position::castling_rook_square(CastlingRights cr) const {
 }
 #endif
 
-inline Bitboard Position::attackers_to(Square s) const { return attackers_to(s, pieces()); }
+// 🚧
 
-inline Bitboard Position::checkers() const { return st->checkersBB; }
-
-inline Bitboard Position::blockers_for_king(Color c) const { return st->blockersForKing[c]; }
-
-inline Bitboard Position::pinners(Color c) const { return st->pinners[c]; }
-
-inline Bitboard Position::check_squares(PieceType pt) const {
-    ASSERT_LV3(pt != NO_PIECE_TYPE && pt < PIECE_TYPE_NB);
-    return st->checkSquares[pt];
-}
 
 #if STOCKFISH
-inline HASH_KEY Position::key() const { return adjust_key50(st->key); }
+inline Key Position::key() const { return adjust_key50(st->key); }
 
-template<bool AfterMove>
-inline HASH_KEY Position::adjust_key50(HASH_KEY k) const {
-    return st->rule50 < 14 - AfterMove ? k : k ^ (make_key((st->rule50 - (14 - AfterMove)) / 8) << 1);
+inline Key Position::adjust_key50(Key k) const {
+    return st->rule50 < 14 ? k : k ^ make_key((st->rule50 - 14) / 8);
 }
 #else
-inline HASH_KEY Position::key() const { return st->key(); }
+inline Key Position::key() const { return st->key(); }
+inline Key Position::hand_key() const { return st->hand_key; }  // 将棋: 手駒のみ Zobrist
 #endif
 
 #if defined(USE_PARTIAL_KEY)
-inline HASH_KEY Position::pawn_key() const { return st->pawnKey ^ HASH_KEY(sideToMove); }
+inline Key Position::pawn_key() const { return st->pawnKey; }
 
-inline HASH_KEY Position::material_key() const { return st->materialKey; }
+inline Key Position::material_key() const { return st->materialKey; }
 
-inline HASH_KEY Position::minor_piece_key() const { return st->minorPieceKey ^ HASH_KEY(sideToMove); }
+inline Key Position::minor_piece_key() const { return st->minorPieceKey; }
 
-inline HASH_KEY Position::non_pawn_key(Color c) const { return st->nonPawnKey[c] ^ HASH_KEY(sideToMove); }
+inline Key Position::non_pawn_key(Color c) const { return st->nonPawnKey[c]; }
 #else
 
 // 使わないのでダミーの値を返すようにしておく。
 
-inline HASH_KEY Position::pawn_key() const { return HASH_KEY(); }
-inline HASH_KEY Position::material_key() const { return HASH_KEY(); }
-inline HASH_KEY Position::minor_piece_key() const { return HASH_KEY(); }
-inline HASH_KEY Position::non_pawn_key(Color c) const { return HASH_KEY(); }
+inline Key Position::pawn_key() const { return Key(); }
+inline Key Position::material_key() const { return Key(); }
+inline Key Position::minor_piece_key() const { return Key(); }
+inline Key Position::non_pawn_key(Color c) const { return Key(); }
 
 #endif
 
@@ -1360,8 +1485,6 @@ inline Value Position::non_pawn_material() const {
 }
 #endif
 
-inline int Position::plies_from_null() const { return st->pliesFromNull; }
-
 inline int Position::game_ply() const { return gamePly; }
 
 #if STOCKFISH
@@ -1371,41 +1494,30 @@ inline bool Position::is_chess960() const { return chess960; }
 
 inline bool Position::capture(Move m) const {
     assert(m.is_ok());
-    const MoveType mt = m.type_of();
-
-    if (mt == NORMAL || mt == PROMOTION)
-        return !empty(m.to_sq());
-
-    return mt == EN_PASSANT;
+    return (!empty(m.to_sq()) && m.type_of() != CASTLING) || m.type_of() == EN_PASSANT;
 }
 #else
 inline bool Position::capture(Move m) const {
     ASSERT_LV3(m.is_ok());
-    return !m.is_drop() && !empty(m.to_sq());
+    return !m.is_drop() && piece_on(m.to_sq()) != NO_PIECE;
 }
 #endif
 
 
-// Returns true if a move is generated from the capture stage, having also
-// queen promotions covered, i.e. consistency with the capture stage move
-// generation is needed to avoid the generation of duplicate moves.
-// 捕獲段階で生成される指し手ならtrueを返す。Stockfishではクイーンへの成りも含み、
-// 重複生成を避けるため、捕獲段階の指し手生成と判定条件を一致させる必要がある。
-// 将棋側は捕獲段階で実際の捕獲だけを生成するため、capture()と同じ判定にする。
+// returns true if a move is generated from the capture stage
+// having also queen promotions covered, i.e. consistency with the capture stage move generation
+// is needed to avoid the generation of duplicate moves.
+
+// キャプチャ段階で生成された指し手であれば true を返す
+// クイーン昇格も含めてカバーする。つまり、キャプチャ段階での指し手生成との整合性を
+// 保つ必要があり、重複した指し手の生成を避けるためである。
+// 💡 「キャプチャ段階」とは、MovePickerでの指し手生成のうち捕獲する指し手の生成フェーズのこと。
+
 inline bool Position::capture_stage(Move m) const
 {
 #if STOCKFISH
-    assert(m.is_ok());
-
-    const MoveType mt = m.type_of();
-
-    if (mt == NORMAL)
-        return !empty(m.to_sq());
-
-    if (mt == PROMOTION)
-        return !empty(m.to_sq()) || m.promotion_type() == QUEEN;
-
-    return mt == EN_PASSANT;
+    assert(is_ok(m));
+    return  capture(m) || promotion_type(m) == QUEEN;
 #else
 
     // 📊　V7.73y3とy4,y5の比較。
@@ -1416,8 +1528,6 @@ inline bool Position::capture_stage(Move m) const
     return capture(m);
 #endif
 }
-
-inline Piece Position::captured_piece() const { return st->capturedPiece; }
 
 // 駒を配置して、内部的に保持しているBitboard、pieceCountも更新する。
 inline void Position::put_piece(Piece pc, Square s) {
@@ -1453,8 +1563,6 @@ inline void Position::remove_piece(Square s) {
 #endif
 }
 
-inline StateInfo* Position::state() const { return st; }
-
 #if !STOCKFISH
 
 // put_pieceの手駒版
@@ -1473,11 +1581,11 @@ inline void Position::remove_hand_piece(Color c, PieceType pr)
     //pieceCount[make_piece(c, ALL_PIECES)]--;
 }
 
-
 inline bool is_ok(Position& pos) { return pos.pos_is_ok(); }
 #endif
 
 // 🚧
+
 
 
 // sに利きのあるc側の駒を列挙する。
@@ -1493,13 +1601,13 @@ inline Bitboard Position::attackers_to(Square sq, const Bitboard& occ) const {
 	// sの地点に敵駒ptをおいて、その利きに自駒のptがあればsに利いているということだ。
 	// 香の利きを求めるコストが惜しいのでrookEffect()を利用する。
 	return
-		(     (Attacks::pawnEffect  <Them>(sq)	&  pieces(PAWN)        )
-			| (Attacks::knightEffect<Them>(sq)	&  pieces(KNIGHT)      )
-			| (Attacks::silverEffect<Them>(sq)	&  pieces(SILVER_HDK)  )
-			| (Attacks::goldEffect  <Them>(sq)	&  pieces(GOLDS_HDK)   )
-			| (Attacks::bishopEffect(sq, occ)	&  pieces(BISHOP_HORSE))
-			| (Attacks::rookEffect(sq, occ)		& (pieces(ROOK_DRAGON) | (Attacks::lanceStepEffect<Them>(sq) & pieces(LANCE))))
-			//  | (Attacks::kingEffect(sq) & pieces(c, HDK));
+		(     (pawnEffect  <Them>(sq)	&  pieces(PAWN)        )
+			| (knightEffect<Them>(sq)	&  pieces(KNIGHT)      )
+			| (silverEffect<Them>(sq)	&  pieces(SILVER_HDK)  )
+			| (goldEffect  <Them>(sq)	&  pieces(GOLDS_HDK)   )
+			| (bishopEffect(sq, occ)	&  pieces(BISHOP_HORSE))
+			| (rookEffect(sq, occ)		& (pieces(ROOK_DRAGON) | (lanceStepEffect<Them>(sq) & pieces(LANCE))))
+			//  | (kingEffect(sq) & pieces(c, HDK));
 			// →　HDKは、銀と金のところに含めることによって、参照するテーブルを一個減らして高速化しようというAperyのアイデア。
 			) & pieces(C); // 先後混在しているのでc側の駒だけ最後にマスクする。
 	;
@@ -1518,7 +1626,7 @@ Bitboard Position::attacks_by() const {
         Bitboard threats   = Bitboard(ZERO);
         Bitboard attackers = pieces(C, Pt);
         while (attackers)
-            threats |= Attacks::attacks_bb(make_piece(C, Pt), attackers.pop(), pieces());
+            threats |= attacks_bb<make_piece(C, Pt)>(attackers.pop(), pieces());
         return threats;
     }
 }
@@ -1536,14 +1644,14 @@ Bitboard Position::pinned_pieces(Square avoid) const {
 	Bitboard avoid_bb = ~Bitboard(avoid);
 
 	pinners = (
-		(  pieces(ROOK_DRAGON)   & Attacks::rookStepEffect    (ksq))
-		| (pieces(BISHOP_HORSE)  & Attacks::bishopStepEffect  (ksq))
-		| (pieces(LANCE)         & Attacks::lanceStepEffect<C>(ksq)))
+		(  pieces(ROOK_DRAGON)   & rookStepEffect    (ksq))
+		| (pieces(BISHOP_HORSE)  & bishopStepEffect  (ksq))
+		| (pieces(LANCE)         & lanceStepEffect<C>(ksq)))
                 & avoid_bb & pieces(~C);
 
 	while (pinners)
 	{
-		b = Attacks::between_bb(ksq, pinners.pop()) & pieces() & avoid_bb;
+		b = between_bb(ksq, pinners.pop()) & pieces() & avoid_bb;
 		if (!b.more_than_one())
             result |= b & pieces(C);
 	}
@@ -1565,16 +1673,16 @@ Bitboard Position::pinned_pieces(Square from, Square to) const {
 	Bitboard avoid_bb = ~Bitboard(from);
 
 	pinners = (
-		(  pieces(ROOK_DRAGON)  & Attacks::rookStepEffect    (ksq))
-		| (pieces(BISHOP_HORSE) & Attacks::bishopStepEffect  (ksq))
-		| (pieces(LANCE)        & Attacks::lanceStepEffect<C>(ksq)))
+		(  pieces(ROOK_DRAGON)  & rookStepEffect    (ksq))
+		| (pieces(BISHOP_HORSE) & bishopStepEffect  (ksq))
+		| (pieces(LANCE)        & lanceStepEffect<C>(ksq)))
             & avoid_bb & pieces(~C);
 
 	// fromからは消えて、toの地点に駒が現れているものとして
 	Bitboard new_pieces = (pieces() & avoid_bb) | to;
 	while (pinners)
 	{
-		b = Attacks::between_bb(ksq, pinners.pop()) & new_pieces;
+		b = between_bb(ksq, pinners.pop()) & new_pieces;
 		if (!b.more_than_one())
 			result |= b & pieces(C);
 	}

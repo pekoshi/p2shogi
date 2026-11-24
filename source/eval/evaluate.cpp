@@ -1,11 +1,8 @@
-﻿#include "../evaluate.h"
-
-#include <algorithm>
-#include <map>
-
-#include "../misc.h"
+﻿#include "../types.h"
 #include "../position.h"
-#include "../types.h"
+#include "../evaluate.h"
+#include "../misc.h"
+#include <map>
 
 namespace YaneuraOu {
 namespace Eval
@@ -22,8 +19,10 @@ namespace Eval
 
 #endif
 
-	// 必要なときに駒割りを全計算する。
-	// USE_MATERIAL_VALUEを有効にした構成では、局面設定時に計算し、以降は差分更新する。
+#if defined(USE_PIECE_VALUE)
+	// 何らかの評価関数を用いる以上、駒割りの計算は必須。
+	// 評価関数を一切呼び出さないならこの計算は要らないが、
+	// 実行時のオーバーヘッドは小さいので、そこまで考慮することもなさげ。
 
 	// 駒割りの計算
 	// 先手側から見た評価値
@@ -41,6 +40,7 @@ namespace Eval
 
 		return (Value)v;
 	}
+#endif
 
 #if defined(EVAL_KPPT) || defined(EVAL_KPP_KKPT)
 

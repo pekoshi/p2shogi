@@ -1,5 +1,5 @@
-﻿#ifndef PRINT_INFO_H_INCLUDED
-#define PRINT_INFO_H_INCLUDED
+﻿#ifndef __PRINT_INFO_H_INCLUDED__
+#define __PRINT_INFO_H_INCLUDED__
 
 #include "../../config.h"
 #if defined(YANEURAOU_ENGINE_DEEP)
@@ -58,4 +58,4 @@ BestMovePonder get_best_move_multipv(const Node*                       rootNode,
 
 #endif // defined(YANEURAOU_ENGINE_DEEP)
 
-#endif // ndef PRINT_INFO_H_INCLUDED
+#endif // ndef __PRINT_INFO_H_INCLUDED__

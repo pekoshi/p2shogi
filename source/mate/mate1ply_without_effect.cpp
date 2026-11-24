@@ -1,7 +1,7 @@
 ﻿#include "mate.h"
-#include "../misc.h"
 
-#if defined(USE_MATE_1PLY) && !defined(LONG_EFFECT_LIBRARY)
+// P2_MATE1PLY_NOEFFECT: LONG_EFFECT 有効でも without_effect 実装を維持(探索木保全)。
+#if defined(USE_MATE_1PLY) && (!defined(LONG_EFFECT_LIBRARY) || defined(P2_MATE1PLY_NOEFFECT))
 
 // clang-format off
 // 🌈 indentに特別な意味があるので、clang-formatはこのファイルでは無効化しておく。
@@ -12,8 +12,6 @@
 #include "../position.h"
 
 namespace YaneuraOu {
-
-using namespace Attacks;
 
 //#include <iostream>
 //using std::cout;
@@ -316,8 +314,7 @@ namespace {
 						break;
 
 					default:
-						ASSERT_LV3(false);
-						sf_unreachable();
+						UNREACHABLE;
 					}
 
 					bb &= ~Bitboard(sq); // sqの地点邪魔なので消しておく。
@@ -721,7 +718,7 @@ namespace Mate {
 
 	// 1手で詰むならばその指し手を返す。なければMOVE_NONEを返す
 	template <Color Us>
-	SYSV_ABI Move mate_1ply_imp(const Position& pos)
+	Move mate_1ply_imp(const Position& pos)
 	{
 		ASSERT_LV3(!pos.checkers());
 

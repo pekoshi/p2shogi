@@ -10,15 +10,17 @@ namespace YaneuraOu::Benchmark {
 	// ベンチマーク用のUSIコマンド列をstringの配列に入れて返してくれる。
 	//  currentFen : 現在のSfen文字列
 	//  is         : コマンドライン("bench"に続くパラメーターを取得するためのもの)
-	std::vector<std::string> setup_bench(const std::string& /*currentFen*/, std::istream& /*is*/);
+	std::vector<std::string> setup_bench(const std::string& currentFen, std::istream& is);
 
 	// ベンチマークのセットアップの構造体
 	struct BenchmarkSetup {
 		// 置換表サイズ
-		int                   ttSize;
+		// 📝 Stockfishではintだが、やねうら王ではsize_tに変更しておく。
+		size_t                   ttSize;
 
 		// スレッド数
-		int                   threads;
+		// 📝 Stockfishではintだが、やねうら王ではsize_tに変更しておく。
+		size_t                   threads;
 
 		// setup_bench()で生成したコマンド列
 		std::vector<std::string> commands;
@@ -31,8 +33,8 @@ namespace YaneuraOu::Benchmark {
 	};
 
 	// benchコマンドのコマンドラインからBenchmarkSetupの構造体に情報を詰め込んで返す。
-	BenchmarkSetup setup_benchmark(std::istream& /*is*/);
+	BenchmarkSetup setup_benchmark(std::istream& is);
 
-}  // namespace YaneuraOu::Benchmark
+}  // namespace YaneuraOu
 
 #endif  // #ifndef BENCHMARK_H_INCLUDED

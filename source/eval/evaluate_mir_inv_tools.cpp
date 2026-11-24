@@ -1,8 +1,6 @@
 ﻿#include "evaluate_mir_inv_tools.h"
 #if defined(USE_EVAL_LIST)
 
-#include <unordered_set>
-
 namespace YaneuraOu {
 
 namespace Eval

@@ -2,7 +2,7 @@
 
 #include "../../../config.h"
 
-#if (defined(EVAL_NNUE) || defined(EVAL_SFNN))
+#if defined(EVAL_NNUE)
 
 #include "half_kp_vm.h"
 #include "index_list.h"
@@ -61,10 +61,11 @@ void HalfKP_vm<AssociatedKing>::AppendActiveIndices(
 template <Side AssociatedKing>
 void HalfKP_vm<AssociatedKing>::AppendChangedIndices(
 	const Position& pos, Color perspective,
-	IndexList* removed, IndexList* added, const Eval::DirtyPiece& dp) {
+	IndexList* removed, IndexList* added) {
 	BonaPiece* pieces;
 	Square sq_target_k;
 	GetPieces(pos, perspective, &pieces, &sq_target_k);
+	const auto& dp = pos.state()->dirtyPiece;
 	for (int i = 0; i < dp.dirty_num; ++i) {
 		if (dp.pieceNo[i] >= PIECE_NUMBER_KING) continue;
 		const auto old_p = static_cast<BonaPiece>(
@@ -82,4 +83,4 @@ template class HalfKP_vm<Side::kEnemy>;
 } // namespace Eval::NNUE::Features
 } // namespace YaneuraOu
 
-#endif  // (defined(EVAL_NNUE) || defined(EVAL_SFNN))
+#endif  // defined(EVAL_NNUE)

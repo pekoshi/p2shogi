@@ -1,5 +1,4 @@
 ﻿#include "long_effect.h"
-#include "../misc.h"
 
 // namespace Effect8 { Directions direc_table[SQ_NB_PLUS1][SQ_NB_PLUS1]; }
 // → shogi.cppで定義している。LONG_EFFECT_LIBRARYが必要なときは、この定義も用意すること。
@@ -10,15 +9,12 @@
 
 #if defined(LONG_EFFECT_LIBRARY)
 
-#include "../attacks.h"
 #include "../bitboard.h"
 #include "../position.h"
 
 #include <cstring>	// std::memset()
 
 namespace YaneuraOu {
-
-using namespace Attacks;
 
 // Effect8::operator<<()で用いるヘルパー関数
 // 3*3ならN=3 , 5*5ならN=5..
@@ -61,7 +57,7 @@ namespace Effect8
       for (auto d : Direct())
       {
         // SQ_22の地点でその周辺8近傍の状態を使ってテーブルを初期化する
-        auto effect = attacks_bb(pc, SQ_22 + DirectToDelta(d), Bitboard(ZERO));
+        auto effect = effects_from(pc, SQ_22 + DirectToDelta(d), Bitboard(ZERO));
         // 利きがある場所が0、ない場所が1なのでnotしておく。
         auto effect8_not = ~around8(effect, SQ_22);
 
@@ -73,7 +69,7 @@ namespace Effect8
     for (auto pc : Piece())
     {
       // SQ_22に相手の駒を置いたときの利きの場所が、そこに置いてSQ_22に王手になる場所
-      auto effect = attacks_bb(Piece(pc ^ PIECE_WHITE), SQ_22, Bitboard(ZERO));
+      auto effect = effects_from(Piece(pc ^ PIECE_WHITE), SQ_22, Bitboard(ZERO));
       auto effect8 = around8(effect, SQ_22);
       piece_check_around8_table[pc] = effect8;
     }
@@ -263,7 +259,7 @@ namespace LongEffect
     {
       Piece pc = pos.piece_on(sq);
       // pcをsqに置くことによる利きのupdate
-      auto effect = attacks_bb(pc, sq, pos.pieces());
+      auto effect = effects_from(pc, sq, pos.pieces());
       Color c = color_of(pc);
       for (auto to : effect)
         ADD_BOARD_EFFECT(c, to, 1);
@@ -271,7 +267,7 @@ namespace LongEffect
       {
         // ただし、馬・龍に対しては、長い利きは、角・飛車と同じ方向だけなので成り属性を消して、利きを求め直す。
         if (type_of(pc) != LANCE)
-          effect = attacks_bb(Piece(pc & ~PIECE_PROMOTE), sq, pos.pieces());
+          effect = effects_from(Piece(pc & ~PIECE_PROMOTE), sq, pos.pieces());
 
         for (auto to : effect)
         {
@@ -328,7 +324,7 @@ namespace LongEffect
       return Bitboard(ZERO);
 
     default:
-      ASSERT_LV3(false); sf_unreachable(); return Bitboard(ZERO);
+      UNREACHABLE; return Bitboard(ZERO);
     }
   }
 

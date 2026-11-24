@@ -2,7 +2,7 @@
 
 #include "../../../config.h"
 
-#if (defined(EVAL_NNUE) || defined(EVAL_SFNN)) && defined(LONG_EFFECT_LIBRARY) && defined(USE_BOARD_EFFECT_PREV)
+#if defined(EVAL_NNUE) && defined(LONG_EFFECT_LIBRARY) && defined(USE_BOARD_EFFECT_PREV)
 
 #include "pe9.h"
 #include "index_list.h"
@@ -84,9 +84,10 @@ void PE9::AppendActiveIndices(
 // 特徴量のうち、一手前から値が変化したインデックスのリストを取得する
 void PE9::AppendChangedIndices(
     const Position& pos, Color perspective,
-    IndexList* removed, IndexList* added, const Eval::DirtyPiece& dp) {
+    IndexList* removed, IndexList* added) {
   BonaPiece* pieces;
   GetPieces(pos, perspective, &pieces);
+  const auto& dp = pos.state()->dirtyPiece;
 
   for (int i = 0; i < dp.dirty_num; ++i) {
     if (dp.pieceNo[i] >= PIECE_NUMBER_KING) continue;
@@ -130,4 +131,4 @@ void PE9::AppendChangedIndices(
 } // namespace Eval::NNUE::Features
 } // namespace YaneuraOu
 
-#endif  // (defined(EVAL_NNUE) || defined(EVAL_SFNN))
+#endif  // defined(EVAL_NNUE)

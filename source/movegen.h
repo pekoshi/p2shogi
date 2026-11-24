@@ -2,8 +2,8 @@
 #define MOVEGEN_H_INCLUDED
 
 #include <algorithm>  // IWYU pragma: keep
+#include <cstddef>
 
-#include "misc.h"
 #include "types.h"
 
 // --------------------
@@ -12,15 +12,14 @@
 
 namespace YaneuraOu {
 
-class Position;
-
 #if STOCKFISH
 
 enum GenType {
     CAPTURES,
     QUIETS,
     EVASIONS,
-    ALL
+    NON_EVASIONS,
+    LEGAL
 };
 
 #else
@@ -28,15 +27,18 @@ enum GenType {
 // 生成する指し手の種類
 enum GenType {
     //
-    // LEGAL/LEGAL_ALL以外はpseudo-legalな指し手を生成し、自玉が王手になる手も含む。
-    // MovePickerを通さずに使う場合は、do_move()の前にPosition::legal()で確認する。
-    // EVASIONSは王手中、NON_EVASIONSは王手がない局面で用いる。
-    // ALLは、省略することのある不成も生成するかどうかを表す。
+    // 注意)
+    // 指し手生成器で生成される指し手はすべてpseudo-legalであるが、
+    // LEGAL/LEGAL_ALL以外は自殺手が含まれることがある。
+    // (pseudo-legalは自殺手も含むので)
+    //
+    // そのため、do_moveの前にPosition::legal()でのチェックが必要である。
+    //
 
     QUIETS,                 // 駒を取らない指し手
     CAPTURES,               // 駒を取る指し手
 
-    QUIETS_ALL,             // QUIETS + 歩の不成、大駒の不成で駒を取らない手
+    QUIETS_ALL,             // QUIETS + 歩の不成、大駒の不成で駒を取る手
     CAPTURES_ALL,           // CAPTURES     + 歩の不成、大駒の不成で駒を取る手
 
     CAPTURES_PRO_PLUS,      // CAPTURES     + 価値のかなりあると思われる成り(歩だけ)
@@ -51,7 +53,7 @@ enum GenType {
 
     // BonanzaではCAPTURESに銀以外の成りを含めていたが、Aperyでは歩の成り以外は含めない。
     // あまり変な成りまで入れるとオーダリングを阻害する。
-    // 通常探索のMovePickerはCAPTURESとQUIETSを使い、捕獲の有無で生成を分ける。
+    // 本ソースコードでは、NON_CAPTURESとCAPTURESは使わず、CAPTURES_PRO_PLUSとNON_CAPTURES_PRO_MINUSを使う。
 
     // note : NON_CAPTURESとCAPTURESとの生成される指し手の集合は被覆していない。
     // note : CAPTURES_PRO_PLUSとNON_CAPTURES_PRO_MINUSとの生成される指し手の集合も被覆していない。
@@ -64,7 +66,7 @@ enum GenType {
     NON_EVASIONS,  // 王手の回避ではない手(指し手生成元で王手されていない局面であることがわかっているときのすべての指し手)
     NON_EVASIONS_ALL,  // NON_EVASIONS + 歩の不成などを含む。
 
-    // 王手の有無に応じた生成器を選び、Position::legal()で非合法手を除く。
+    // 以下の2つは、pos.legalを内部的に呼び出すので生成するのに時間が少しかかる。棋譜の読み込み時などにしか使わない。
     LEGAL,      // 合法手すべて。ただし、2段目の歩・香の不成や角・飛の不成は生成しない。
     LEGAL_ALL,  // 合法手すべて
 
@@ -82,6 +84,8 @@ enum GenType {
     RECAPTURES_ALL,  // 指定升への移動の指し手のみを生成する。(歩の不成なども含む)
 };
 #endif
+
+class Position;
 
 // --------------------
 //   拡張された指し手
@@ -162,7 +166,7 @@ struct MoveList {
     const Move* end() const { return last; }
 
 	// 生成された指し手の数
-    usize size() const { return last - moveList; }
+    size_t size() const { return last - moveList; }
 
 	// 生成された指し手のなかに引数で指定された指し手が含まれているかの判定。
     // ⚠ ASSERTなどで用いる。遅いので通常探索等では用いないこと。
@@ -171,7 +175,7 @@ struct MoveList {
 #if !STOCKFISH
 	// 🌈 i番目の要素を返す
 	// 📝 生成された合法手からランダムに選びたい時などに用いる。
-    const Move at(usize i) const {
+    const Move at(size_t i) const {
         ASSERT_LV3(i < size());
         return begin()[i];
     }
@@ -182,6 +186,24 @@ struct MoveList {
 	// last     : 生成された指し手の末尾の要素 + 1 を指すポインター。
     Move moveList[MAX_MOVES], *last;
 };
+
+// 以前のやねうら王との互換性のために用意。
+template<GenType Type>
+ExtMove* generateMoves(const Position& pos, ExtMove* moveList)
+{
+    auto moveList0 = static_cast<Move*>(moveList);
+    auto moveList1 = generate<Type>(pos, moveList0);
+
+	// これをexpandして返す。
+
+	// ⚠ 符号型にしておかないと i >= 0 が意味をなさない。
+	int size = int(moveList1 - moveList0);
+	for (int i = size - 1; i >= 0; --i)
+		// MoveからMoveExtへのコピー
+		moveList[i] = moveList0[i];
+
+	return moveList + size;
+}
 
 }  // namespace YaneuraOu
 

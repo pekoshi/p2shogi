@@ -1,5 +1,4 @@
 ﻿#include "nn.h"
-#include "../../extra/tools.h"
 
 #if defined(YANEURAOU_ENGINE_DEEP)
 

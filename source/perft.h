@@ -1,14 +1,13 @@
 ﻿#ifndef PERFT_H_INCLUDED
 #define PERFT_H_INCLUDED
 
-#include <cstdint>
-#include <memory>
-#include <variant>
+//#include <cstdint>
 
 #include "movegen.h"
 #include "position.h"
 #include "types.h"
 #include "usi.h"
+#include "misc.h"
 
 namespace YaneuraOu::Benchmark {
 
@@ -23,10 +22,11 @@ namespace YaneuraOu::Benchmark {
 //     指し手生成が正常に行われているかや、生成速度等のテストとして有用。
 
 template<bool Root>
-u64 perft(Position& pos, Depth depth) {
+uint64_t perft(Position& pos, Depth depth) {
 
+    StateInfo st;
 
-    u64   cnt, nodes = 0;
+    uint64_t   cnt, nodes = 0;
     const bool leaf = (depth == 2);
 
     for (const auto& m : MoveList<LEGAL_ALL>(pos))
@@ -35,7 +35,7 @@ u64 perft(Position& pos, Depth depth) {
             cnt = 1, nodes++;
         else
         {
-            pos.do_move(m);
+            pos.do_move(m, st);
             cnt = leaf ? MoveList<LEGAL_ALL>(pos).size() : perft<false>(pos, depth - 1);
             nodes += cnt;
             pos.undo_move(m);
@@ -51,29 +51,26 @@ u64 perft(Position& pos, Depth depth) {
 }
 
 #if STOCKFISH
-inline std::variant<u64, PositionSetError>
-perft(const std::string& fen, Depth depth , bool isChess960) {
+inline uint64_t perft(const std::string& fen, Depth depth , bool isChess960) {
 #else
-inline std::variant<u64, PositionSetError>
-perft(const std::string& fen, Depth depth /*, bool isChess960 */) {
+inline uint64_t perft(const std::string& fen, Depth depth /*, bool isChess960 */) {
 
-    const auto start = now();
+	ElapsedTimer time;
+    time.reset();
 #endif
 
-    std::unique_ptr<Position> p = std::make_unique<Position>();
+	Position  p;
+    StateInfo st;
 
 #if STOCKFISH
-    if (auto err = p->set(fen, isChess960))
-        return {*err};
-
-    return perft<true>(*p, depth);
+    p.set(fen, isChess960, &st);
+    return perft<true>(p, depth);
 #else
-    if (auto err = p->set(fen))
-        return {*err};
+    p.set(fen, &st);
 
 	// 🌈 やねうら王では、NPS(leaf nodeの数/elapsed)と計測に要した時間も出力する。
-	auto nodes = perft<true>(*p, depth);
-    auto elapsed = now() - start + 1; // ゼロ割防止のために +1
+	auto nodes = perft<true>(p, depth);
+    auto elapsed = time.elapsed() + 1; // ゼロ割防止のために +1
 
 	sync_cout << "Elapsed Time = " << elapsed << " [ms]" << sync_endl;
     sync_cout << 1000 * nodes / elapsed << " NPS" << sync_endl;

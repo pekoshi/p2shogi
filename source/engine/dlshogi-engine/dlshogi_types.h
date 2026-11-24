@@ -1,5 +1,5 @@
-﻿#ifndef DLSHOGI_TYPES_H_INCLUDED
-#define DLSHOGI_TYPES_H_INCLUDED
+﻿#ifndef __DLSHOGI_TYPES_H_INCLUDED__
+#define __DLSHOGI_TYPES_H_INCLUDED__
 
 #include "../../config.h"
 #if defined(YANEURAOU_ENGINE_DEEP)
@@ -60,4 +60,4 @@ constexpr float DISCARDED = -FLT_MAX;
 } // namespace dlshogi
 
 #endif // defined(YANEURAOU_ENGINE_DEEP)
-#endif // DLSHOGI_TYPES_H_INCLUDED
+#endif // __DLSHOGI_TYPES_H_INCLUDED__

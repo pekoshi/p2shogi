@@ -1,7 +1,6 @@
-﻿#ifndef NN_TENSORRT_H_INCLUDED
-#define NN_TENSORRT_H_INCLUDED
+﻿#ifndef __NN_TENSORRT_H_INCLUDED__
+#define __NN_TENSORRT_H_INCLUDED__
 #include "../../config.h"
-#include "../../extra/tools.h"
 
 #if defined(YANEURAOU_ENGINE_DEEP) && defined(TENSOR_RT)
 
@@ -115,4 +114,4 @@ namespace Eval::dlshogi
 } // namespace YaneuraOu
 
 #endif // defined(YANEURAOU_ENGINE_DEEP) && defined(TENSOR_RT)
-#endif // ndef NN_TENSORRT_H_INCLUDED
+#endif // ndef __NN_TENSORRT_H_INCLUDED__

@@ -1,37 +1,9 @@
 ﻿#include "engine.h"
-
-#include <algorithm>
-#include <cassert>
-#include <filesystem>
-#include <iosfwd>
-#include <memory>
-#include <ostream>
-#include <sstream>
-#include <string_view>
-#include <utility>
-#include <vector>
-
-#if !STOCKFISH
-#include <chrono>
-#include <condition_variable>
-#include <mutex>
-#include <thread>
-#endif
-
-#include "evaluate.h"
-#include "misc.h"
-#include "numa.h"
+#include "thread.h"
 #include "perft.h"
-#include "position.h"
-#include "search.h"
-#include "types.h"
-#include "usi.h"
 #include "usioption.h"
-
-#if !STOCKFISH
-#include "extra/tools.h"
 #include "book/book.h"
-#endif
+#include "search.h"
 
 namespace YaneuraOu {
 
@@ -50,13 +22,13 @@ constexpr NumaAutoPolicy DefaultNumaPolicy = BundledL3Policy{32};
 
 Engine::Engine() :
 	numaContext(NumaConfig::from_system(DefaultNumaPolicy)),
-	threads(),
-    network(numaContext)
+	states(new std::deque<StateInfo>(1)),
+	threads()
 {
 
 #if !defined(USE_CLASSIC_EVAL)
 	// 局面は平手の開始局面にしておく。
-	pos.set(StartSFEN);
+	pos.set(StartSFEN, &states->back());
 	// ⚠ CLASSIC EVALは、Position::set()の途中でcompute_eval()を呼び出すので
 	//     その時に評価関数の初期化がなされるが、その時点では評価関数の読み込みが
 	//     完了していないので、アクセス違反で落ちる。
@@ -78,10 +50,17 @@ void Engine::usi()
     sync_cout << "id name " << engine_info(true) << "\n" << engine.get_options() << sync_endl;
     sync_cout << "uciok" << sync_endl;
 #else
+#if defined(EVAL_P2NNUE)
+    // p2shogi: USI id is "p2shogi v9" / author (no eval name or CPU suffix).
+    sync_cout << "id name " << get_engine_name() << " " << get_engine_version() << "\n"
+              << "id author " << get_engine_author() << "\n"
+              << get_options() << sync_endl;
+#else
     sync_cout << "id name "
               << engine_info(get_engine_name(), get_engine_author(), get_engine_version(),
                              get_eval_name())
               << get_options() << sync_endl;
+#endif
 
     sync_cout << "usiok" << sync_endl;
 #endif
@@ -109,12 +88,7 @@ void Engine::add_base_options() {
 
     options.add(  //
       "NumaPolicy", Option("auto", [this](const Option& o) {
-          // 注意: Stockfish def601ccにも残る挙動を維持している。
-          // 不正値を拒否しても、Option::currentValueは元に戻らない。
-          // NUMA構成自体は維持されるが、後のThreadPool::set()はその不正な文字列を読み、
-          // none/auto以外としてバインドを有効にする場合がある。上流の修正時に見直す。
-          if (!set_numa_config_from_option(o))
-              return "NumaPolicy: invalid value '" + std::string(o) + "', keeping previous config.";
+          set_numa_config_from_option(o);
           return numa_config_information_as_string() + "\n"
                + thread_allocation_information_as_string();
       }));
@@ -151,7 +125,7 @@ void Engine::add_base_options() {
     // デバッグ用にログファイルへ書き出す。
     options.add(  //
       "DebugLogFile", Option("", [](const Option& o) {
-          start_logger(path_from_utf8(std::string(o)));
+          start_logger(o);
           return std::nullopt;
       }));
 }
@@ -166,9 +140,7 @@ void Engine::add_options() {
     options.add(  //
       // 📝 やねうら王では default threadを4に変更する。
       //     過去にdefault設定のまま対局させて「やねうら王弱い」という人がいたため。
-      "Threads", Option(4, 1, MaxThreads, [this](const Option&) -> std::optional<std::string> {
-          if (deferResourceOptions)
-              return std::nullopt;
+      "Threads", Option(4, 1, MaxThreads, [this](const Option&) {
           resize_threads();
           return thread_allocation_information_as_string();
       }));
@@ -198,38 +170,28 @@ void Engine::add_options() {
 }
 
 // NumaConfig(numaContextのこと)を Options["NumaPolicy"]の値 から設定する。
-bool Engine::set_numa_config_from_option(const std::string& o) {
-    // 遅延反映を使うエンジンでは、検証済みのNUMA構成をisready()まで保持する。
-    auto set_config = [this](NumaConfig&& config) {
-        if (deferResourceOptions)
-            pendingNumaConfig = std::move(config);
-        else
-            numaContext.set_numa_config(std::move(config));
-    };
-
-    if (o == "auto" || o == "system")
-        set_config(NumaConfig::from_system(DefaultNumaPolicy));
-    else if (o == "hardware")
-        // Don't respect affinity set in the system.
-        // システムで設定されたアフィニティーを考慮しない。
-        set_config(NumaConfig::from_system(DefaultNumaPolicy, false));
-    else if (o == "none")
-        set_config(NumaConfig{});
+void Engine::set_numa_config_from_option(const std::string& o) {
+	if (o == "auto" || o == "system")
+	{
+		numaContext.set_numa_config(NumaConfig::from_system(DefaultNumaPolicy));
+	}
+	else if (o == "hardware")
+	{
+		// Don't respect affinity set in the system.
+		numaContext.set_numa_config(NumaConfig::from_system(DefaultNumaPolicy, false));
+	}
+	else if (o == "none")
+	{
+		numaContext.set_numa_config(NumaConfig{});
+	}
 	else
 	{
-        auto parsed = NumaConfig::from_string(o);
-        if (!parsed.has_value())
-            return false;
-        set_config(std::move(*parsed));
+		numaContext.set_numa_config(NumaConfig::from_string(o));
 	}
-
-    if (deferResourceOptions)
-        return true;
 
 	// Force reallocation of threads in case affinities need to change.
 	resize_threads();
 	threads.ensure_network_replicated();
-    return true;
 }
 
 
@@ -254,7 +216,8 @@ std::optional<PositionSetError> Engine::set_position(const std::string&         
 	// Drop the old state and create a new one
 	// 古い状態を破棄して新しい状態を作成する
 
-	auto err = pos.set(sfen /*, options["UCI_Chess960"]*/ );
+	states = StateListPtr(new std::deque<StateInfo>(1));
+	auto err = pos.set(sfen /*, options["UCI_Chess960"]*/ , &states->back());
 	if (err.has_value())
 		return err;
 
@@ -269,10 +232,11 @@ std::optional<PositionSetError> Engine::set_position(const std::string&         
 		if (m == Move::none())
 			return PositionSetError("Illegal move: " + move);
 
+		states->emplace_back();
 		if (m == Move::null())
-			pos.do_null_move();
+			pos.do_null_move(states->back());
 		else
-			pos.do_move(m);
+			pos.do_move(m, states->back());
 
 #if !STOCKFISH
 		moves0.emplace_back(m);
@@ -294,6 +258,10 @@ void Engine::usinewgame()
 {
 	wait_for_search_finished();
 
+	// 🚨NALLOC: ノードの残高は 1 局のあいだだけ持ち越す。 局をまたいで持ち越すと総和が壊れる。
+	NAlloc::dump();    // 前局の要約 (枯渇率) を出してから
+	NAlloc::reset();
+
 	//tt.clear(threads);
 	threads.clear();
 
@@ -311,9 +279,8 @@ void Engine::isready()
 	sync_cout << "readyok" << sync_endl;
 }
 
-std::variant<u64, PositionSetError>
-Engine::perft(const std::string& fen, Depth depth /*, bool isChess960 */) {
-	verify_network();
+std::uint64_t Engine::perft(const std::string& fen, Depth depth /*, bool isChess960 */) {
+	verify_networks();
 
 	return Benchmark::perft(fen, depth /*, isChess960 */);
 }
@@ -321,12 +288,14 @@ Engine::perft(const std::string& fen, Depth depth /*, bool isChess960 */) {
 
 void Engine::go(Search::LimitsType& limits) {
 	ASSERT_LV3(limits.perft == 0);
-	//verify_network();
+	//verify_networks();
 
-	threads.start_thinking(options, pos, limits);
+	threads.start_thinking(options, pos, states, limits);
 }
 
-void Engine::stop() { threads.stop = true; }
+// 🎯理論離脱 v2: `external_stop` を立ててから止める。 探索が自分で終わる場合と区別するため
+//   (ponder miss の stop 直後に追加パスを回すと bestmove が遅れる / 設計 §3.5-②)。
+void Engine::stop() { threads.external_stop = true; threads.stop = true; }
 
 void Engine::search_clear() {
 #if STOCKFISH
@@ -335,7 +304,7 @@ void Engine::search_clear() {
     tt.clear(threads);
     threads.clear();
 
-    // TODO: does not work with multiple instances
+    // @TODO wont work with multiple instances
     Tablebases::init(options["SyzygyPath"]);  // Free mapped files
 #else
 	// benchコマンドから内部的に呼び出す。
@@ -360,12 +329,8 @@ void Engine::set_on_bestmove(std::function<void(std::string_view, std::string_vi
     updateContext.onBestmove = std::move(f);
 }
 
-void Engine::set_on_start(std::function<void()>&& f) { updateContext.onStart = std::move(f); }
-
-void Engine::set_on_verify_network(std::function<void(std::string_view)>&& f) {
-#if STOCKFISH
-    onVerifyNetwork = std::move(f);
-#endif
+void Engine::set_on_verify_networks(std::function<void(std::string_view)>&& f) {
+    //onVerifyNetworks = std::move(f);
 	// TODO : あとで
 }
 
@@ -387,8 +352,7 @@ void Engine::resize_threads() {
 	// 📌 スレッド数のリサイズ
 
 #if STOCKFISH
-    threads.set(numaContext.get_numa_config(), {options, threads, tt, sharedHists, network},
-                updateContext);
+	threads.set(numaContext.get_numa_config(), { options, threads, tt, networks }, updateContext);
 #else
 
 	// 🌈  やねうら王ではここでWorkerFactoryを渡すように変更。
@@ -403,7 +367,7 @@ void Engine::resize_threads() {
 		{ return make_unique_large_page<Search::Worker>(sharedState, ids); };
 
     threads.set(numaContext.get_numa_config(),
-                {options, threads, tt, sharedHists, network}, /* これはSharedState 相当 */
+                {options, threads, tt, sharedHists /*, networks*/ }, /* これはSharedState 相当 */
 				updateContext,
                 options["Threads"],
 				worker_factory);
@@ -424,7 +388,7 @@ void Engine::resize_threads() {
 	threads.ensure_network_replicated();
 }
 
-void Engine::set_tt_size(usize mb) {
+void Engine::set_tt_size(size_t mb) {
 #if STOCKFISH
 	wait_for_search_finished();
     tt.resize(mb, threads);
@@ -450,12 +414,13 @@ void Engine::set_ponderhit(bool b) {
 void Engine::trace_eval() const {
 	// 🌈 やねうら王では、Engine派生classで定義する。
 #if STOCKFISH
+	StateListPtr trace_states(new std::deque<StateInfo>(1));
+    Position     p;
 
-    std::unique_ptr<Position> p = std::make_unique<Position>();
-    p->set(pos.fen(), options["UCI_Chess960"]);
+	p.set(pos.fen(), options["UCI_Chess960"], &trace_states->back());
 
-    verify_network();
-	sync_cout << "\n" << Eval::trace(*p, *network) << sync_endl;
+    verify_networks();
+	sync_cout << "\n" << Eval::trace(p, *networks) << sync_endl;
 #endif
 }
 
@@ -489,114 +454,66 @@ int Engine::get_hashfull(int maxAge) const { return tt.hashfull(maxAge); }
 int Engine::get_hashfull(int maxAge) const { return 0; }
 #endif
 
-std::vector<std::pair<usize, usize>> Engine::get_bound_thread_count_by_numa_node() const {
-    auto                                 counts = threads.get_bound_thread_count_by_numa_node();
-    const NumaConfig&                    cfg    = numaContext.get_numa_config();
-    std::vector<std::pair<usize, usize>> ratios;
-    NumaIndex                            n = 0;
-    for (; n < counts.size(); ++n)
-        ratios.emplace_back(counts[n], cfg.num_cpus_in_numa_node(n));
-    if (!counts.empty())
-        for (; n < cfg.num_numa_nodes(); ++n)
-            ratios.emplace_back(0, cfg.num_cpus_in_numa_node(n));
-    return ratios;
+std::vector<std::pair<size_t, size_t>> Engine::get_bound_thread_count_by_numa_node() const {
+	auto                                   counts = threads.get_bound_thread_count_by_numa_node();
+	const NumaConfig& cfg = numaContext.get_numa_config();
+	std::vector<std::pair<size_t, size_t>> ratios;
+	NumaIndex                              n = 0;
+	for (; n < counts.size(); ++n)
+		ratios.emplace_back(counts[n], cfg.num_cpus_in_numa_node(n));
+	if (!counts.empty())
+		for (; n < cfg.num_numa_nodes(); ++n)
+			ratios.emplace_back(0, cfg.num_cpus_in_numa_node(n));
+	return ratios;
 }
 
 std::string Engine::get_numa_config_as_string() const {
-    return numaContext.get_numa_config().to_string();
+	return numaContext.get_numa_config().to_string();
 }
 
 std::string Engine::numa_config_information_as_string() const {
-    auto cfgStr = get_numa_config_as_string();
-    return "Available processors: " + cfgStr;
+	auto cfgStr = get_numa_config_as_string();
+	return "Available processors: " + cfgStr;
 }
 
 std::string Engine::thread_binding_information_as_string() const {
-    auto              boundThreadsByNode = get_bound_thread_count_by_numa_node();
-    std::stringstream ss;
-    if (boundThreadsByNode.empty())
-        return ss.str();
+	auto              boundThreadsByNode = get_bound_thread_count_by_numa_node();
+	std::stringstream ss;
+	if (boundThreadsByNode.empty())
+		return ss.str();
 
-    bool isFirst = true;
+	bool isFirst = true;
 
-    for (auto&& [current, total] : boundThreadsByNode)
-    {
-        if (!isFirst)
-            ss << ":";
-        ss << current << "/" << total;
-        isFirst = false;
-    }
+	for (auto&& [current, total] : boundThreadsByNode)
+	{
+		if (!isFirst)
+			ss << ":";
+		ss << current << "/" << total;
+		isFirst = false;
+	}
 
-    return ss.str();
+	return ss.str();
 }
 
 std::string Engine::thread_allocation_information_as_string() const {
-    std::stringstream ss;
+	std::stringstream ss;
 
-    usize threadsSize = threads.size();
-    ss << "Using " << threadsSize << (threadsSize > 1 ? " threads" : " thread");
+	size_t threadsSize = threads.size();
+	ss << "Using " << threadsSize << (threadsSize > 1 ? " threads" : " thread");
 
-    auto boundThreadsByNodeStr = thread_binding_information_as_string();
-    if (boundThreadsByNodeStr.empty())
-        return ss.str();
+	auto boundThreadsByNodeStr = thread_binding_information_as_string();
+	if (boundThreadsByNodeStr.empty())
+		return ss.str();
 
-    ss << " with NUMA node thread binding: ";
-    ss << boundThreadsByNodeStr;
+	ss << " with NUMA node thread binding: ";
+	ss << boundThreadsByNodeStr;
 
-    return ss.str();
+	return ss.str();
 }
 
 // --------------------
 //  やねうら王独自拡張
 // --------------------
-
-namespace {
-
-// 初期化中のKeep Alive送信を管理する。スコープを抜けると停止・joinする。
-class KeepAliveThread {
-   public:
-    KeepAliveThread() :
-        thread([this] {
-            std::unique_lock<std::mutex> lk(mutex);
-            thread_started = true;
-            cv.notify_all();
-            while (!cv.wait_for(lk, std::chrono::seconds(5), [this] { return thread_end; }))
-            {
-                sync_cout << sync_endl;  // 改行を送信する。
-
-                // 定跡の読み込み部などで"info string.."で途中経過を出力する場合、
-                // sync_cout ～ sync_endlを用いて送信しないと、この改行を送るタイミングとかち合うと
-                // 変なところで改行されてしまうので注意。
-            }
-        }) {
-        std::unique_lock<std::mutex> lk(mutex);
-        cv.wait(lk, [this] { return thread_started; });
-    }
-
-    ~KeepAliveThread() {
-        {
-            std::lock_guard<std::mutex> lk(mutex);
-            thread_end = true;
-        }
-        cv.notify_all();
-        thread.join();
-    }
-
-    KeepAliveThread(const KeepAliveThread&)            = delete;
-    KeepAliveThread& operator=(const KeepAliveThread&) = delete;
-
-   private:
-    std::mutex              mutex;
-    std::condition_variable cv;
-    // スレッドが起動したことを通知するためのフラグ
-    bool                    thread_started = false;
-    // このスコープを抜ける時に立つフラグ(スレッドを停止させる用)
-    bool thread_end = false;
-    // 定期的な改行送信用のスレッド。参照するフラグより後に構築する。
-    std::thread thread;
-};
-
-}
 
 // 💡 USIで"isready"に対して時間のかかる処理を実行したい時に用いる。
 void Engine::run_heavy_job(std::function<void()> job) {
@@ -614,7 +531,40 @@ void Engine::run_heavy_job(std::function<void()> job) {
     // このあと重い処理を行うのでスレッドの起動が遅延する可能性があるから、先にスレッドを生成して、そのスレッドが起動したことを
     // 確認してから処理を行う。
 
-    KeepAliveThread keep_alive;
+    // スレッドが起動したことを通知するためのフラグ
+    auto thread_started = false;
+
+    // この関数を抜ける時に立つフラグ(スレッドを停止させる用)
+    auto thread_end = false;
+
+    // 定期的な改行送信用のスレッド
+    auto th = std::thread([&] {
+        // スレッドが起動した
+        thread_started = true;
+
+        int count = 0;
+        while (!thread_end)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            if (++count >= 50 /* 5秒 */)
+            {
+                count = 0;
+                sync_cout << sync_endl;  // 改行を送信する。
+
+                // 定跡の読み込み部などで"info string.."で途中経過を出力する場合、
+                // sync_cout ～ sync_endlを用いて送信しないと、この改行を送るタイミングとかち合うと
+                // 変なところで改行されてしまうので注意。
+            }
+        }
+    });
+    SCOPE_EXIT({
+        thread_end = true;
+        th.join();
+    });
+
+    // スレッド起動待ち
+    while (!thread_started)
+        Tools::sleep(100);
 
     // --- Keep Alive的な処理ここまで ---
 

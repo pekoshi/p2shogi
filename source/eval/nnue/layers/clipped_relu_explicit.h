@@ -5,9 +5,8 @@
 #define NNUE_LAYERS_CLIPPED_RELU_EXPLICIT_H_INCLUDED
 
 #include "../../../config.h"
-#include "../../../extra/tools.h"
 
-#if (defined(EVAL_NNUE) || defined(EVAL_SFNN))
+#if defined(EVAL_NNUE)
 
 #include "../nnue_common.h"
 
@@ -174,9 +173,6 @@ class ClippedReLUExplicit {
       output[i] = static_cast<OutputType>(
           std::max(0, std::min(127, input[i] >> kWeightScaleBits)));
     }
-    if constexpr (PaddedOutputDimensions > kOutputDimensions) {
-      std::fill(output + kOutputDimensions, output + PaddedOutputDimensions, OutputType{0});
-    }
   }
 
 };
@@ -184,6 +180,6 @@ class ClippedReLUExplicit {
 }  // namespace Eval::NNUE::Layers
 }  // namespace YaneuraOu
 
-#endif  // (defined(EVAL_NNUE) || defined(EVAL_SFNN))
+#endif  // defined(EVAL_NNUE)
 
 #endif // NNUE_LAYERS_CLIPPED_RELU_EXPLICIT_H_INCLUDED

@@ -1,12 +1,9 @@
-﻿#ifndef PV_MATE_SEARCH_H_INCLUDED
-#define PV_MATE_SEARCH_H_INCLUDED
+﻿#ifndef __PV_MATE_SEARCH_H__
+#define __PV_MATE_SEARCH_H__
 
 #include "../../config.h"
 #if defined(YANEURAOU_ENGINE_DEEP)
 
-#include <mutex>
-
-#include <condition_variable>
 #include <thread>
 #include <set>
 

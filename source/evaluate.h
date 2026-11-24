@@ -1,10 +1,11 @@
-﻿#ifndef EVALUATE_H_INCLUDED
-#define EVALUATE_H_INCLUDED
+﻿#ifndef _EVALUATE_H_
+#define _EVALUATE_H_
 
 #include "config.h"
-#include <string>
-
 #include "types.h"
+
+#include <atomic>       // 2026-10-22: Eval::P2NNUE::g_tt_salt
+#include <functional>
 
 // -------------------------------------
 //   評価関数に対応するheaderの読み込み
@@ -19,35 +20,14 @@
 // -------------------------------------
 
 namespace YaneuraOu {
-
-class Position;
 struct StateInfo;
-class NumaReplicationContext;
-class NumaReplicatedAccessToken;
-template<typename T> class LazyNumaReplicatedSystemWide;
-#if defined(EVAL_SFNN) || defined(EVAL_NNUE)
-namespace Eval::NNUE { struct NnueNetworks; }
-#endif
 
 namespace Eval {
 
-#if defined(EVAL_SFNN) || defined(EVAL_NNUE)
-    using NetworkStorage = LazyNumaReplicatedSystemWide<NNUE::NnueNetworks>;
-#else
-    // Keep network access uniform for engines without NNUE weights.
-    // NNUEの重みを持たないエンジンでも、同じ形でネットワークを参照できるようにする。
-    class NetworkStorage {
-       public:
-        explicit NetworkStorage(NumaReplicationContext&) {}
-        const NetworkStorage& operator[](const NumaReplicatedAccessToken&) const { return *this; }
-    };
-#endif
-
-#if defined(USE_CLASSIC_EVAL) || defined(EVAL_SFNN)
+#if defined(USE_CLASSIC_EVAL)
 	// 評価関数の初期化。これは起動直後に1度だけ呼び出される。
 	// 💡 引数で受け取ったoptionsを用いて、
 	//     評価関数に必要なエンジンオプションを追加することができる。
-#if defined(USE_CLASSIC_EVAL) && !defined(EVAL_NNUE)
 	void add_options(OptionsMap& options, ThreadPool& threads);
 
 	// 駒割り以外の全計算して、その合計を返す。Position::set()で一度だけ呼び出される。
@@ -60,30 +40,155 @@ namespace Eval {
 	// 評価値自体は返さない。
 	// 備考) 差分計算型の評価関数ではないときは、この関数は何もしなくて良い。
 	void evaluate_with_no_return(const Position& pos);
+
+	// dirty-threat �^�v���� do_move ����ɐ������� (P2_DT_EAGER �r���h�̂�)�B
+	// ���� (lazy) �ł� ensure_threat ���Ɂu�e���]���ς݂� ply�v�̕������������邽�߁A
+	// eval ���΂��� node �� chain ���؂�� full �Čv�Z�ɗ�����B
+	// ���� 2026-09-09 (K=256): threat �]���� 71% �� full�A ���� 2/3 �� 2-4ply ���
+	// �L���ȑc��������Ă����B eager �����͂��� chain ���q�����߂� A/B �p�X�C�b�`�B
+	void p2_build_dirty_threats_eager(const Position& pos);
+#if defined(P2_FT_PREFETCH_LINES)
+	// 2026-11-05 (fable): do_move 末尾で FT 行の先頭を prefetch (p2nnue.cpp)。 値は変えない。
+	void p2_prefetch_ft_rows(const Position& pos);
 #endif
 
 	// 評価値の内訳表示(デバッグ用)
 	void print_eval_stat(Position& pos);
 
+	// go 開始時にルート局面の progress から動的 FV_SCALE(eff_fv)と LMR 係数を1回だけ確定し、
+	// 探索中は全ノードで固定する(P2NNUE 専用。他評価関数では no-op)。
+	void p2_search_begin(const Position& rootPos);
+#if defined(P2_BUCKET_OFFSET)
+	// SIDEOFF2 (2026-11-21): 探索の終わりに root の探索値 (表示 cp、 詰みは ±p2_prev_mate_cp()) を記録 / isready で消す。
+	//   P2_SENTE_TABLE_SWITCH_CP の判定に使う (p2nnue.cpp の g_sente_switch_cp の注記)。
+	void p2_note_root_result(const Position& rootPos, bool valid, int disp_cp);
+	void p2_root_result_reset();
+	int  p2_prev_mate_cp();
+#endif
+
+	// p2_search_begin で確定した、探索中固定の LMR reduction table 係数。
+	// start_searching が reductions[] を再構築する際に使う。
+	int p2_root_lmr_coeff();
+
+	// p2_search_begin で確定する、この go のあいだ固定の capture futility 基準。
+	//   序盤 (SPSA_CAPFUT_OPENING) と中盤・終盤 (SPSA_CAPTURE_FUTILITY_BASE) を
+	//   FV_SCALE_PROG_LO/HI と同じ t で補間した値。 OPENING==0 なら本体と同値 = bit-exact。
+	//   ホットパス (moves loop) で読むので関数呼び出しにしない。 SPSA:: の global と同じコスト。
+	inline int p2_root_capfut_base = 492;
+
+	// 表示専用: 内部 cp を FV_SCALE_DISPLAY 基準スケールへ換算(0=OFF/そのまま)。
+	// USI の score cp 出力箇所のみで使用。探索内部ロジックには非関与。
+	int p2_display_rescale_cp(int cp);
+
 	// 評価関数パラメーターを読み込む。
 	// 時間のかかる評価関数の初期化処理はここに書くこと。
 	// これは、"isready"コマンドの応答時に(毎回)呼び出される。
 	// ⚠ EvalDir(評価関数フォルダ)が変更になったあと、isreadyが再度送られてきたら読みなおす処理は自分で書くこと。
-#if defined(EVAL_SFNN) || defined(EVAL_NNUE)
-    void load_eval(LazyNumaReplicatedSystemWide<NNUE::NnueNetworks>& network,
-                   const OptionsMap& options);
-    namespace NNUE { class AccumulatorStack; }
-    Value evaluate(const NNUE::NnueNetworks& network, const Position& pos);
-    Value evaluate(const NNUE::NnueNetworks& network, const Position& pos,
-                   NNUE::AccumulatorStack& stack);
-#if defined(EVAL_NNUE)
-    void evaluate_with_no_return(const NNUE::NnueNetworks& network, const Position& pos,
-                                 NNUE::AccumulatorStack& stack);
+	void load_eval();
+
+	// 評価関数本体
+	Value evaluate(const Position& pos);
+
+#if defined(EVAL_P2NNUE)
+	// lazy-head(A): 非PVノードでは head(dual/pairshape/kdgr/adev)を省略して高速化。
+	// 探索が各ノード入口で !PvNode をセットする。既定 false(root/単発evalは厳密)。
+	extern thread_local bool p2_lazy_head;
+	// lazy eval(B): base+psqt が探索窓 [a-M, b+M] の外なら head 省略(margin 遅延評価)。
+	// 探索が各ノード入口で窓 (alpha,beta) をセット。env P2_LAZYEVAL で有効化。
+	extern thread_local int p2_win_a;
+	extern thread_local int p2_win_b;
+#if defined(P2_SRCH_BUNDLE_A)
+	// 束 A (L5): 探索の node 入口で書く上の TLS (と g_in_qsearch) が、 今の設定で評価関数に読まれるか。
+	//   false のものは探索が書き込みを省く。 go の開始時に呼ぶ (p2nnue.cpp)。
+	void p2_srch_tls_needs(bool& lazyHead, bool& win, bool& qsFlag);
 #endif
-#else
-    void load_eval();
-    // 評価関数本体
-    Value evaluate(const Position& pos);
+	// df-pn 詰みsolver の作業メモリ。2026-09-03 に探索内の同期版は削除済み。
+	// root局面を並行してdf-pn探索し、詰み発見でbestmoveを上書きする。
+	// p2_mate_solver_hash_mb: df-pn用hash[MB] (非同期版 UseMateSolverAsync が使う)。
+	extern int  p2_mate_solver_hash_mb;
+	// ★非同期 df-pn 詰みsolver スレッド(rust crates/p2-search/src/mate_solver_thread.rs の移植)。
+	// UseMateSolverAsync=true のとき go のたびに root 局面を別スレッドで df-pn 探索し、
+	// 詰みを見つけたら bestmove をその手で上書きする。main search には一切干渉しない。
+	// ★Threads の値とは独立に起動する(Threads=1 でも起動し、1 コア余分に使う)。
+	// 既定 false = 現行バイナリと bit-exact。
+	extern bool p2_mate_solver_async;
+	// 非同期 df-pn の 1 回の go あたりのノード上限(USI: MateSolverAsyncMaxNodes)。
+	extern int  p2_mate_solver_async_max_nodes;
+	// NMP verification search(V9.30/rust相当) の ON/OFF。OFF=V9.40相当(検証なし)。
+	extern bool p2_nmp_verification;
+	// NMP が「勝ち(詰み)」スコアで beta を超えたときに beta へ丸めて即 cutoff するか。
+	// 本家 9.40/9.60 は証明されていない詰みスコアを返さないためこのノードを通常探索するが、
+	// NAGISA V3.1 は `return is_win(nullValue) ? beta : nullValue;` で必ず cutoff する。
+	// USI: NmpWinCutoff。既定 false = 現行バイナリと bit-exact。
+	extern bool p2_nmp_win_cutoff;
+	// ★2 PvNode TT-eval 再評価(YO/SF準拠): TT hit した PvNode で ttData.eval を信用せず
+	//   evaluate() を呼び直す。P2NNUE ビルドは既定でこの分岐が無く PvNode でも古い/衝突した
+	//   ttData.eval を信用している(YO 実測 R70 級)。USI: P2PvReeval。既定 false=現行 bit-exact。
+	extern bool p2_pv_reeval;
+	// ---- Stockfish 方式 dirty-threat 差分(2026-07-21)----
+	// do_move の中で「親→子で変化した threat pair」を生タプルとして StateInfo に積む。
+	// ★index ではなく生タプルで持つ理由: index は視点ごとの HM mirror と perspective
+	//   正規化に依存するため、生タプルなら 1 本のリストで両視点を賄える(視点ごとの
+	//   親子スキャン 2 回が 1 回になる)。また親 occupancy の再現が不要なので chain 長無制限。
+	// pack: bit0-6 attacker square(0..80) / bit7-13 target square(0..80)
+	//       bit14-18 attacker Piece / bit19-23 target Piece / bit24 add(1=+,0=-)
+	struct P2DirtyThreat { std::uint32_t data; };
+
+	// threat 入力(P2_ARCH_768T)の bit-exact 検証用: 現局面の STM 視点 threat index を
+	// 昇順で表示する(USI "p2threat" コマンド)。bullet canonical vector と比較する。
+	namespace P2NNUE { void dump_threat_indices(const Position& pos); }
+	// 2026-10-01: threat accumulator (K 本) を吐く計測用 (USI `thracc`)。
+	namespace P2NNUE { void dump_threat_acc(const Position& pos); }
+	// 2026-10-01: FT の clamp 飽和本数 (USI `ftsat`)。
+	namespace P2NNUE { void dump_ft_saturation(const Position& pos); }
+	namespace P2NNUE { void dump_ft_saturation_dim(const Position& pos); }
+	// 2026-10-01: TL1 の Golden Forward 検査 (USI `tl1chk`)。
+	namespace P2NNUE { void dump_tl1_check(const Position& pos); }
+	// aux 入力(P2_AUX: KZ+HANG+STATKD)の bit-exact 検証用: 現局面の STM/NSTM 視点
+	// aux 発火 local index を昇順で表示する(USI "p2aux" コマンド)。
+	// bullet example shogi_aux_canonical の出力と比較する。
+	namespace P2NNUE { void dump_aux_indices(const Position& pos); }
+	// auxcheap(P2_AUXCHEAP: KZ2x+HG6+OUT6+STATKD-kd2)の bit-exact 検証用: 現局面の
+	// STM/NSTM 発火 index と STATKD-kd2 絶対色カウントを表示(USI "p2auxcheap" コマンド)。
+	// scratchpad/statkd_bbverify.py bitboard版(kd2 merge)と照合する。
+	namespace P2NNUE { void dump_auxcheap_indices(const Position& pos); }
+	// Endgame Tempo の black/white class を表示する（学習側との parity 検証用）。
+	namespace P2NNUE { void dump_endgame_tempo(const Position& pos); }
+	// LayerStack 選択(進行度4区分×持駒量2区分 or Legacy progress8)の内訳を表示する
+	// (USI "p2stack" コマンド)。学習側 bullet の test vector と完全一致を検証する。
+	namespace P2NNUE { void dump_layer_stack(const Position& pos); }
+	// 2026-10-20: for MovePicker migigyoku guidance (MIGI_MOVEORDER_SCALE).
+	//   NOT used by evaluate() -- eval stays bit-exact.
+	//   migigyoku_side_bits   : bit0 = king is on the right, bit1 = rook is on the right
+	//   migigyoku_build_weight: 0..256 while still building, **0 once already migigyoku**
+	//   (ASCII only: this header has mixed encodings, see p2nnue.cpp for the JP comments)
+	namespace P2NNUE { int migigyoku_side_bits(const Position& pos, Color c); }
+	namespace P2NNUE { int migigyoku_build_weight(const Position& pos, Color c); }
+	// 2026-10-22: TT key salt for the root-color dependent eval terms
+	//   (OwnBoardB / OwnKnightAdv). 0 when those options are all 0, so the XOR in
+	//   TranspositionTable::first_entry() is the identity and the TT stays bit-exact.
+	//   Updated once per `go` in p2_search_begin() by EVERY worker thread, hence atomic
+	//   (relaxed is a plain mov on x86). See p2nnue.cpp for the JP comments.
+	//   (ASCII only: this header has mixed encodings)
+	namespace P2NNUE { extern std::atomic<std::uint64_t> g_tt_salt; }
+	// 2026-10-25: K-star root re-pick (RootStyleMargin). 0 = off (bit-exact).
+	namespace P2NNUE {
+#if 0   // K-star (RootStyle) rejected 2026-10-28: MultiPV=1 leaves non-PV score at -inf, so it never fires.
+		extern int g_rootstyle_margin;
+		extern int g_rootstyle_kind;
+		int        rootstyle_count(const Position& pos);
+#endif
+	}
+#ifdef P2_PRUNE_STATS   // 2026-10-21: measurement build only (candidate A is closed)
+	// 2026-10-20: measurement only (P2_PRUNE_VBIN_MODE=1). Returns the LayerStack
+	//   progress bucket 0..7 if StateInfo already has it, else **-1 (unknown)**.
+	//   NEVER calls ensure_progress() -- doing so on a fresh node breaks bit-exactness.
+	namespace P2NNUE { int progress_bucket_if_computed(const Position& pos); }
+	// 2026-10-20: measurement only. 1 if progress is within delta of the nearest
+	//   LayerStack threshold, 0 if far, **-1 (unknown)** if StateInfo has no value.
+	//   delta = env P2_PROG_NEAR_DELTA (default 0.15). Never calls ensure_progress().
+	namespace P2NNUE { int progress_near_threshold_if_computed(const Position& pos); }
+#endif
 #endif
 
 #if defined(EVAL_KPPT) || defined(EVAL_KPP_KKPT)
@@ -98,6 +203,9 @@ namespace Eval {
 #endif
 
 #endif // defined(USE_CLASSIC_EVAL)
+
+
+#if defined (USE_PIECE_VALUE)
 
     // 駒割りを計算する。
 	// 💡 この関数は、classic evalでなくとも用いることがある。(例えば、dfpnのMovePickerでmaterialに従ってorderingする場合など)
@@ -148,6 +256,16 @@ namespace Eval {
 	// ⚠  後手の駒に対してもプラスの値が返る。
 	Value CapturePieceValuePlusPromote(const Position& pos, Move move);
 
+#else
+
+	// 📝 cpに変換する時に必要なのでPawnValueだけは定義しておく。
+	enum {
+		PawnValue = 90
+	};
+
+#endif
+
+
 #if defined(USE_EVAL_LIST)
 
 	// --- 評価関数で使う定数 KPP(玉と任意2駒)のPに相当するenum
@@ -166,7 +284,7 @@ namespace Eval {
 
 		// --- 手駒
 
-#if defined (EVAL_MATERIAL) || defined (EVAL_KPPT) || defined(EVAL_KPP_KKPT) || (defined(EVAL_NNUE) || defined(EVAL_SFNN))
+#if defined (EVAL_MATERIAL) || defined (EVAL_KPPT) || defined(EVAL_KPP_KKPT) || defined(EVAL_NNUE) || defined(EVAL_P2NNUE)
 		// Apery(WCSC26)方式。0枚目の駒があるので少し隙間がある。
 		// 定数自体は1枚目の駒のindexなので、EVAL_KPPの時と同様の処理で問題ない。
 		// 例)
@@ -426,9 +544,16 @@ namespace Eval {
 	};
 #endif // defined(USE_EVAL_LIST)
 
+#if defined(USE_EVAL_HASH)
+	// EvalHashのリサイズ
+	void EvalHash_Resize(size_t mbSize);
+
+	// EvalHashのクリア
+	void EvalHash_Clear();
+#endif
 
 
 } // namespace Eval
 } // namespace YaneuraOu
 
-#endif // #ifndef EVALUATE_H_INCLUDED
+#endif // #ifndef _EVALUATE_H_

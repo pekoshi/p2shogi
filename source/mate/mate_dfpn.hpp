@@ -713,7 +713,7 @@ namespace Mate::Dfpn32
 				 // pnはMoveOrdering有りだと 2**16 されていることに注意。
 				 // 残り探索ノード数がpnを上回ると証明不可。不詰は証明できるかもしれないが、不詰の証明はあまり価値がないのでこの状況下ならできなくていいと思う。
 				 // ↑この枝刈りは、やねうらお考案。leaf nodeから呼び出すときに3%ぐらいnps上がる。
-				 && !stop // スレッド停止命令が来たら即座に終了する。
+				 && !stop.load(std::memory_order_relaxed) // スレッド停止命令が来たら即座に終了する。
 				)
 			{
 #if 0
@@ -735,11 +735,11 @@ namespace Mate::Dfpn32
 				auto best_child = select_the_best_child<or_node>(node, second_pn2, second_dn2);
 
 				// 一手進めて子ノードに行く
-
+				StateInfo si;
 				Move m = pos.to_move(Move16(u16(u32(best_child->lastMove))));
 				// ⇨ ここ、lastMoveがu32かMove型なので、Move16にしたいのだが、この変換が一発で書けない。
 
-				pos.do_move(m);
+				pos.do_move(m, si);
 
 				// 再帰的に呼び出す。
 				ParallelSearch<!or_node>(pos, best_child ,second_pn2 , second_dn2);

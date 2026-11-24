@@ -1,5 +1,4 @@
 ﻿#include "../config.h"
-#include "../extra/system_io.h"
 
 #if defined(USE_POLICY_BOOK)
 
@@ -7,7 +6,6 @@
 
 #include "policybook.h"
 #include "../misc.h"
-#include "../extra/tools.h"
 #include "../position.h"
 #include "../thread.h"
 #include "../usi.h"
@@ -61,7 +59,7 @@ Tools::Result PolicyBook::read_book_db(std::string path)
 		u64 counter = 0;
 		std::string sfen, moves_str;
 		Position pos;
-
+		StateInfo si;
 		reader.ReadLine(sfen);
 		if (sfen != POLICY_BOOK_HEADER)
 		{
@@ -72,7 +70,7 @@ Tools::Result PolicyBook::read_book_db(std::string path)
 		{
 			if (reader.ReadLine(sfen).is_not_ok())
 				break;
-			pos.set(sfen);
+			pos.set(sfen, &si, Threads.main());
 
 			reader.ReadLine(moves_str);
 			auto moves = StringExtension::split(moves_str);
@@ -146,7 +144,7 @@ Tools::Result PolicyBook::read_book_db(std::string path)
 
 		/*
 		// テストコード
-		pos.set_hirate();
+		pos.set_hirate(&si);
 		auto key = pos.hash_key();
 		auto ptr = probe_policy_book(key);
 		if (ptr != nullptr)
@@ -387,10 +385,10 @@ PolicyBookEntry* PolicyBook::probe_policy_book(HASH_KEY key)
 void PolicyBook::append_sfen_to_db_bin(const std::string& sfen)
 {
 	Position pos;
-
+	StateList si;
 	std::vector<PolicyBookEntry> entries;
 
-	BookTools::feed_position_string(pos, sfen, [&](Position& p, Move m) {
+	BookTools::feed_position_string(pos, sfen, si, [&](Position& p, Move m) {
 		// 最後の局面は、m==Move::none()が入ってくる。
 		// また、不成の指し手は無視しないと対局時のPolicyの確率の合計が100%にならなくなる。
 		if (m == Move::none() || !pos.pseudo_legal_s<false>(m))
@@ -416,8 +414,8 @@ void merge_test()
 	book1.read_book_db_bin("C:/Users/yaneen/largefile/YaneuraOuBookWork/policy_book_2020-2024.20241204.db.bin");
 
 	Position pos;
-
-	pos.set_hirate();
+	StateInfo si;
+	pos.set_hirate(&si);
 	auto key = pos.hash_key();
 
 	{

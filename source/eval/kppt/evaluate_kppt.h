@@ -1,5 +1,5 @@
-﻿#ifndef EVALUATE_KPPT_H_INCLUDED
-#define EVALUATE_KPPT_H_INCLUDED
+﻿#ifndef _EVALUATE_KPPT_H_
+#define _EVALUATE_KPPT_H_
 
 #include "../../config.h"
 

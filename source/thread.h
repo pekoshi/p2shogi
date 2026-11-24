@@ -3,25 +3,18 @@
 
 #include <atomic>
 #include <condition_variable>
-#include <functional>
-#include <memory>
+//#include <cstddef>
+//#include <cstdint>
 #include <mutex>
 #include <vector>
 
 #include "memory.h"
-#include "misc.h"
 #include "numa.h"
+#include "position.h"
 #include "search.h"
-#include "thread_native.h"
+#include "thread_win32_osx.h"
 
 namespace YaneuraOu {
-
-class OptionsMap;
-class Position;
-#if STOCKFISH
-using Value = int;
-// これ参照していないので削除すべきだと思う。
-#endif
 
 // --------------------
 // スレッドの属するNumaを管理する
@@ -53,7 +46,7 @@ public:
          に対してbinder() とやるとこのoperatorが呼び出されて、
 	     NumaReplicatedAccessTokenがもらえる。
 	 
-	     そのあと (void) (network[numaAccessToken]); とやると
+	     そのあと (void) (networks[numaAccessToken]); とやると
 	     (これは、Search::Worker::ensure_network_replicated()で行っている)
 	     適切なNUMAに割り当てられるようになっている。
 	 
@@ -100,15 +93,15 @@ public:
 	Thread(
 		Search::SharedState&,
 #if STOCKFISH
-		std::unique_ptr<Search::SearchManager>,
+		std::unique_ptr<Search::ISearchManager>,
 #else
-		// 📌 やねうら王では、SearchManagerを渡す代わりに、Workerのfactoryを使ってWorkerを直接生成する。
+		// 📌 やねうら王では、ISearchManagerを使わずに、Workerのfactoryを使ってWorkerを直接生成する。
 		Search::WorkerFactory          factory,
 #endif
-		usize                         /*threadIdx*/,
-		usize						  /*numaThreadIdx*/,
-		usize						  /*numaTotal*/,
-		OptionalThreadToNumaNodeBinder /*binder*/
+		size_t                         threadIdx,
+		size_t						   numaThreadIdx,
+		size_t						   numaTotal,
+		OptionalThreadToNumaNodeBinder binder
 	);
 	virtual ~Thread();
 
@@ -154,7 +147,7 @@ public:
 
 	// Threadの自身のスレッド番号を返す。0 origin。
 	// コンストラクタで渡したthread_idが返ってくる。
-	usize id() const { return idx; }
+	size_t id() const { return idx; }
 
 	// 実行しているworker
 	LargePagePtr<Search::Worker> worker;
@@ -170,7 +163,9 @@ private:
 	std::condition_variable   cv;
 
 	// thread id。main threadなら0。slaveなら1から順番に値が割当てられる。
-    usize idx, idxInNuma, totalNuma;
+	// nthreadsは、スレッド数。(options["Threads"]の値)
+    size_t idx, idxInNuma, totalNuma /*, nthreads */;
+    // 📌 nthreads使わないと思う。やねうら王ではコメントアウト
 
 	// exit      : このフラグが立ったら終了する。
 	// searching : 探索中であるかを表すフラグ。プログラムを簡素化するため、事前にtrueにしてある。
@@ -195,6 +190,12 @@ private:
 // そして最も重要なスレッドの実行など、スレッドに関するすべての処理を扱います。
 // スレッドへのすべてのアクセスは、このクラスを通して行われます。
 
+// 2026-09-28 NALLOC: ノードの「銀行」(定義は thread.cpp)。 main thread からしか触らない。
+namespace NAlloc {
+void reset();
+void dump();   // 1 局分の要約 (枯渇率の検証用)
+}
+
 class ThreadPool {
 public:
 	ThreadPool() {}
@@ -218,16 +219,16 @@ public:
 	ThreadPool& operator=(ThreadPool&&) = delete;
 
 	// mainスレッドに思考を開始させる。
-	void   start_thinking(const OptionsMap&, Position&, Search::LimitsType);
+	void   start_thinking(const OptionsMap&, Position&, StateListPtr&, Search::LimitsType);
 
 	// 指定したthreadIdのthreadで、jobとしてfを実行する。
-	void   run_on_thread(usize threadId, std::function<void()> f);
+	void   run_on_thread(size_t threadId, std::function<void()> f);
 
 	// 指定したthreadIdのthreadが、jobを実行終わるのを待つ。
-	void   wait_on_thread(usize threadId);
+	void   wait_on_thread(size_t threadId);
 
 	// このThreadPoolが保持しているthread数
-	usize num_threads() const;
+	size_t num_threads() const;
 
 	// set()で生成したスレッドの初期化
     // 💡 各ThreadのWorkerに対してclear()が呼び出される。
@@ -236,15 +237,12 @@ public:
 	// requested_threadsの数になるように、スレッド数を変更する。
     // 💡 各ThreadのWorkerに対してclear()が1度以上呼び出されることは保証されている。
     void set(const NumaConfig&            numaConfig,
-             Search::SharedState /*sharedState*/,
-#if STOCKFISH
-              const Search::SearchManager::UpdateContext&);
-#else
+             Search::SharedState sharedState,
              const Search::UpdateContext&,
 			 // 🌈 やねうら王独自追加
-             usize                       requested_threads,
-             const Search::WorkerFactory& worker_factory);
-#endif
+             size_t                       requested_threads,
+             const Search::WorkerFactory& worker_factory
+	);
     /*
 	   💡 Stockfishでは、
             Search::SharedState,
@@ -275,16 +273,15 @@ public:
     // →　これはPosition::do_move()を呼び出した回数。
     // ※　dlshogiエンジンで、探索ノード数が知りたい場合は、
     // 　dlshogi::nodes_visited()を呼び出すこと。
-    u64 nodes_searched() const;
+    uint64_t nodes_searched() const;
 
 #if STOCKFISH
 	// 💡 tablebaseにhitした回数。将棋では使わない。
-	u64               tb_hits() const;
+	uint64_t               tb_hits() const;
 
-#endif
-
-#if STOCKFISH || defined(YANEURAOU_ENGINE)
-    Thread* get_best_thread() const;
+	// ⚠ これは、やねうら王の標準探索エンジンでしか使わないので、
+    //     YaneuraOuEngine側に移動させる。
+	Thread*  get_best_thread() const;
 #endif
 
 	// メイン以外のすべてのスレッドのstart_searching()を呼び出す。(並列探索の開始)
@@ -296,52 +293,54 @@ public:
     void wait_for_search_finished() const;
 
 
-    // 各スレッドのNUMAノード。bindしない設定では空。
-    std::vector<usize> get_bound_thread_to_numa_node() const;
-    std::vector<usize> get_bound_thread_count_by_numa_node() const;
-    // bind先のNUMAノード数。bindしない場合は1を返す。
-    usize numa_nodes() const;
+	std::vector<size_t> get_bound_thread_count_by_numa_node() const;
 
 	// 評価関数パラメーターがいま実行しているNUMAに配置されているようにする。
 	void ensure_network_replicated();
 
 	// stop          : 探索の停止フラグ
+	// abortedSearch : 探索自体を破棄するためのフラグ
+	//		           🤔 このフラグ、必要なのか？
 	// increaseDepth : aspiration searchでdepthが増えていっているかのフラグ
 	//                 🤔 このフラグはSearchManagerに移動
 
-	std::atomic_bool stop
+	std::atomic_bool stop, abortedSearch
 #if STOCKFISH
 		, increaseDepth
 #endif
 		;
 
-#if !STOCKFISH
-    // Threadの所有権はThreadPoolが管理し、外部にはThreadへの参照だけを返す。
-    Thread&       at(usize index) { return *threads.at(index); }
-    const Thread& at(usize index) const { return *threads.at(index); }
-#endif
+	// 🎯🎯**外部 (USI の stop / ponder miss) から止められたか** (2026-10-27 / 理論離脱 v2)。
+	//   `stop` は探索が自分で終わるときにも立つので、 「外から止められた」と区別できない。
+	//   理論離脱の追加パス (パス B) は、 外から止められた直後には**回してはいけない**
+	//   (bestmove が予算分だけ遅れ、 CSA client は bestmove を待ってから次を送る)。
+	//   `start_thinking` で下ろし、 `Engine::stop()` で立てる。
+	std::atomic_bool external_stop{false};
 
-    // 読み取り専用の走査にはcbegin()/cend()を使う。
-    auto cbegin() const noexcept { return threads.cbegin(); }
-    auto begin() noexcept { return threads.begin(); }
-    auto end() noexcept { return threads.end(); }
-    auto cend() const noexcept { return threads.cend(); }
-    auto size() const noexcept { return threads.size(); }
-    auto empty() const noexcept { return threads.empty(); }
+	auto cbegin() const noexcept { return threads.cbegin(); }
+	auto begin() noexcept { return threads.begin(); }
+	auto end() noexcept { return threads.end(); }
+	auto cend() const noexcept { return threads.cend(); }
+	auto size() const noexcept { return threads.size(); }
+	auto empty() const noexcept { return threads.empty(); }
+
+	// 抱えているすべてのThread
+	// 💡 Stockfishではprivate memberなのだが、
+	//     やねうら王ではEngine派生class側からアクセスしたいことがあるのでpublicに変更。
+	std::vector<std::unique_ptr<Thread>> threads;
 
 private:
-
-    // 抱えているすべてのThread。生成・破棄はThreadPool内で行う。
-    std::vector<std::unique_ptr<Thread>> threads;
+	// 現局面までのStateInfoのlist
+	StateListPtr                         setupStates;
 
 	// 各threadに対応するNUMAのindex
 	std::vector<NumaIndex>               boundThreadToNumaNode;
 
 	// Threadクラスの特定のメンバー変数を足し合わせたものを返す。
 	// 💡 nodesの集計に用いる。
-	u64 accumulate(RelaxedAtomic<u64> Search::Worker::* member) const {
+	uint64_t accumulate(std::atomic<uint64_t> Search::Worker::* member) const {
 
-		u64 sum = 0;
+		uint64_t sum = 0;
 		for (auto&& th : threads)
 			sum += (th->worker.get()->*member).load(std::memory_order_relaxed);
 		return sum;

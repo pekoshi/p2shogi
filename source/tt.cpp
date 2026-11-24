@@ -1,32 +1,23 @@
-﻿#if !STOCKFISH
-#include "extra/tools.h"
-#endif
-#include "tt.h"
+﻿#include "tt.h"
 
-#include <algorithm>
+#include "evaluate.h"   // 2026-10-22: Eval::P2NNUE::g_tt_salt (TT key salt)
 #include <cassert>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
-#if STOCKFISH
-#include <numeric>
-#include <vector>
-
-#include "bitboard.h"
-#endif
+//#include <thread>
+//#include <vector>
 
 #include "memory.h"
 #include "misc.h"
 #include "thread.h"
-
-#if !STOCKFISH
 #include "engine.h"
+#include "spsa_params.h"  // ★SF port #2: SPSA::SF_TT_AGING (secondary aging の ON/OFF)
 
 // やねうら王独自拡張
-
 #include "extra/key128.h"
 #include "testcmd/unit_test.h"
-#endif
 
 namespace YaneuraOu {
 
@@ -39,8 +30,9 @@ namespace YaneuraOu {
 /// ※ cache line sizeは、IntelだとPentium4やPentiumMからでPentiumⅢ(3)までは32byte。
 ///    そこ以降64byte。AMDだとK8のときには既に64byte。
 
-// TTEntry struct is the 8 bytes transposition table entry, defined as:
+// TTEntry struct is the 10 bytes transposition table entry, defined as:
 //
+// key        16 bit
 // depth       8 bit
 // pv node     1 bit
 // bound type  2 bit
@@ -49,15 +41,17 @@ namespace YaneuraOu {
 // value      16 bit
 // evaluation 16 bit
 //
-// The 21-bit keys are packed separately in Cluster::keys.
+// These fields are in the same order as accessed by TT::probe(), since memory is fastest sequentially.
+// Equally, the store order in save() matches this order.
 //
-// We use `bool(depth8)` as the cheap internal occupancy check, corresponding
-// to `depth == DEPTH_NONE` externally, so we offset the internal depth by DEPTH_NONE.
+// We use `bool(depth8)` as the cheap internal occupancy check, corresponding to `depth == DEPTH_NONE`
+// externally, so we offset the internal depth by DEPTH_NONE.
 //
 // Pv, bound and generation are packed in a single byte.
 
-// TTEntry 構造体は以下のように定義された8バイトのトランスポジションテーブルエントリです:
+// TTEntry 構造体は以下のように定義された10バイトのトランスポジションテーブルエントリです:
 //
+// key        16 bit
 // depth       8 bit
 // pv node     1 bit
 // bound type  2 bit
@@ -77,6 +71,7 @@ namespace YaneuraOu {
 
 // ■ 各メンバーの意味
 //
+// key        16 bit : hash keyの下位16bit(bit0は除くのでbit16..1)
 // depth       8 bit : 格納されているvalue値の探索深さ
 // move       16 bit : このnodeの最善手(指し手16bit ≒ Move16 , Moveの上位16bitは無視される)
 // generation  5 bit : このエントリーにsave()された時のTTの世代カウンターの値
@@ -88,165 +83,127 @@ namespace YaneuraOu {
 // pv node , bound type , generation をあわせると 1 + 2 + 5 bit = 8 bitとなる。
 // TTEntryは、この3つを合わせた変数として generation8 が格納されている。
 //
+// ■ 補足
+//
+// Stockfishではkey16は16bit固定であるが、これをやねうら王では、HASH_KEYが64bit,128bit,256bitのときに
+// それぞれ16bit,64bit,64bitに拡張している。
 
-static constexpr u8 GENERATION_BITS = 5;                            // genBound8のうち、generationに使うbit数。
-static constexpr u8 GENERATION_MASK = (1 << GENERATION_BITS) - 1;   // genBound8からgenerationだけを取り出すためのマスク。
-static constexpr u8 BOUND_SHIFT     = GENERATION_BITS;              // Boundを格納するbit位置。generationの直後に置く。
-static constexpr u8 BOUND_MASK      = 0b11 << BOUND_SHIFT;          // genBound8からBoundの2bitだけを取り出すためのマスク。
-static constexpr u8 PV_SHIFT        = BOUND_SHIFT + 2;              // PV nodeフラグを格納するbit位置。Boundの直後に置く。
-static constexpr u8 PV_MASK         = 1 << PV_SHIFT;                // genBound8からPV nodeフラグだけを取り出すためのマスク。
+static constexpr uint8_t GENERATION_BITS = 5;                            // genBound8のうち、generationに使うbit数。
+static constexpr uint8_t GENERATION_MASK = (1 << GENERATION_BITS) - 1;   // genBound8からgenerationだけを取り出すためのマスク。
+static constexpr uint8_t BOUND_SHIFT     = GENERATION_BITS;              // Boundを格納するbit位置。generationの直後に置く。
+static constexpr uint8_t BOUND_MASK      = 0b11 << BOUND_SHIFT;          // genBound8からBoundの2bitだけを取り出すためのマスク。
+static constexpr uint8_t PV_SHIFT        = BOUND_SHIFT + 2;              // PV nodeフラグを格納するbit位置。Boundの直後に置く。
+static constexpr uint8_t PV_MASK         = 1 << PV_SHIFT;                // genBound8からPV nodeフラグだけを取り出すためのマスク。
 
 struct TTEntry {
 
-    // Extract data from the TT entry. We have to convert TT internal bitfields
-    // to external types.
-	// TTエントリからデータを取り出す。TT内部のビットフィールドを
-	// 外部で使用する型に変換する必要がある。
+    // Convert internal bitfields to external types
+    // 内部ビットフィールドを外部型に変換します
 
 	TTData read() const {
-#if STOCKFISH
-        return TTData{Move(move16),
-#else
-		// やねうら王では、32bit Moveを設定する必要があるが、
-		// この時点では上位16bitは不明であるため、0埋めしておく。
-		return TTData{Move(u32(Move16(move16).to_u16())),
-#endif
-				Value(value16),
-				Value(eval16),
-				Depth(DEPTH_NONE + depth8),
-				Bound((genBound8 & BOUND_MASK) >> BOUND_SHIFT),
-				bool(genBound8 & PV_MASK)};
+		return TTData{
+		  Move(u32(move16.to_u16())), Value(value16), Value(eval16), Depth(DEPTH_NONE + depth8),
+		  Bound((genBound8 & BOUND_MASK) >> BOUND_SHIFT), bool(genBound8 & PV_MASK)};
 	}
 
-    // Check if the TT entry is occupied
 	// このEntryが使われているか？
-	bool is_occupied() const { return bool(depth8); }
+	bool is_occupied() const { return bool(depth8); };
 
-    // Return TT entry age
-    // TT entryの世代を返す
-	u8 relative_age(const u8 curr_generation) const;
+#if STOCKFISH
+    void save(Key k, Value v, bool pv, Bound b, Depth d, Move m, Value ev, uint8_t generation8);
+#else
+    void
+    save(TTE_KEY_TYPE k, Value v, bool pv, Bound b, Depth d, Move m, Value ev, uint8_t generation8);
+#endif
+
+	uint8_t relative_age(const uint8_t curr_generation) const;
 
    private:
     friend class TranspositionTable;
+    friend struct TTWriter;  // ★SF port #2: TTWriter::penalize() が depth8 を直接触るため (SF と同じ)
 
-    friend struct TTWriter;
-
-    RelaxedAtomic<u8>   depth8;
-    RelaxedAtomic<u8>   genBound8;
-#if STOCKFISH
-    RelaxedAtomic<Move> move16;
-#else
-    RelaxedAtomic<Move16> move16;
-#endif
-    RelaxedAtomic<i16>  value16;
-    RelaxedAtomic<i16>  eval16;
+    TTE_KEY_TYPE key;
+    uint8_t      depth8;
+    uint8_t      genBound8;
+    Move16       move16;
+    int16_t      value16;
+    int16_t      eval16;
 };
-// A TranspositionTable is an array of Cluster, of size clusterCount. Each
-// cluster consists of ClusterSize number of TTEntry. Each non-empty TTEntry
-// contains information on exactly one position. The size of a Cluster should
-// divide the size of a cache line for best performance, as the cacheline is
-// prefetched when possible.
-
-// TranspositionTableは、clusterCount個のClusterからなる配列である。
-// 各Clusterは、ClusterSize個のTTEntryで構成される。空でない各TTEntryには、
-// ちょうど1つの局面に関する情報が格納される。最高の性能を得るためには、
-// Clusterのサイズがキャッシュラインのサイズを割り切れるようにすべきである。
-// これは、可能な場合にキャッシュラインがプリフェッチされるためである。
-
-static constexpr int ClusterSize = 3;
-static constexpr int KeyBits     = 21;
-static constexpr u64 KeyMask     = (1ULL << KeyBits) - 1;
 
 
+// Populates the TTEntry with a new node's data, possibly
+// overwriting an old position. The update is non-atomic and can be racy.
 
-struct Cluster {
+// TTEntryに新しいノードのデータを格納し、古い局面を上書きする可能性があります。
+// この更新は非アトミックであり、競合が発生する可能性があります。
 
-    // keys contains the low 21 bits of the Zobrist keys of the 3 TT entries in this cluster,
-    // packed together into 63 bits of an u64
-	// keysには、このCluster内の3つのTTEntryのZobristキーの下位21ビットが格納される。
-	// これらは合計63ビットにパックされ、1つのu64に格納される。
-    RelaxedAtomic<u64> keys;
-    TTEntry            entry[ClusterSize];
-};
-static_assert(sizeof(Cluster) == 32, "Suboptimal Cluster size");
+// ⇨ 置換表のエントリーに対して与えられたデータを保存する。上書き動作
+//   v    : 探索のスコア
+//   eval : 評価関数 or 静止探索の値
+//   m    : ベストな指し手(指し手16bit ≒ Move16 , Moveの上位16bitは無視される)
+//   curr_generation : TT.generation()
+// 引数のgenは、Stockfishにはないが、やねうら王では学習時にスレッドごとに別の局面を探索させたいので
+// スレッドごとに異なるgenerationの値を指定したくてこのような作りになっている。
 
-// Populates the TTEntry and its key with a new node's data, possibly overwriting
-// an old position. The update is non-atomic and can be racy. We convert external
-// types to internal bitfields.
-// TTEntryとそのキーに新しいノードのデータを格納する。この際、古い局面のデータを
-// 上書きする可能性がある。更新は非アトミックであり、競合が発生する可能性がある。
-// 外部で使用する型を内部のビットフィールドに変換する。
-
-
-void TTWriter::write(
-  Key k, Value v, bool pv, Bound b, Depth d, Move m, Value ev, u8 curr_generation) {
-
-#if !STOCKFISH
-	// value,evalが適切な範囲であるか(やねうら王独自追加)
-	ASSERT_LV3(-VALUE_INFINITE <   v  && v < VALUE_INFINITE  ||  v == VALUE_NONE);
-	ASSERT_LV3(-VALUE_MAX_EVAL <= ev && ev <= VALUE_MAX_EVAL || ev == VALUE_NONE);
-#endif
-
-    const int shift   = KeyBits * index;
-    const u64 keys    = cluster->keys;
-    const u64 keyDiff = ((keys >> shift) ^ k) & KeyMask;
-    auto&     entry   = cluster->entry[index];
+void TTEntry::save(TTE_KEY_TYPE k, Value v, bool pv, Bound b, Depth d, Move m, Value ev, uint8_t curr_generation) {
 
 	// Preserve the old ttmove if we don't have a new one
 	// 新しいttmoveがない場合、古いttmoveを保持します
 
-	if (m || keyDiff)
-	#if STOCKFISH
-        entry.move16 = m;
-	#else
-        entry.move16 = m.to_move16();
-    #endif
+	if (m || k != key)
+		move16 = m.to_move16();
 
 	// Overwrite less valuable entries (cheapest checks first)
 	// より価値の低いエントリを上書きします（最も簡単にできるチェックを先に行う）
 
-	if (b == BOUND_EXACT || keyDiff || d - DEPTH_NONE + 2 * pv > entry.depth8 - 4
-		|| entry.relative_age(curr_generation))
+	if (b == BOUND_EXACT || k != key || d - DEPTH_NONE + 2 * pv > depth8 - 4
+		|| relative_age(curr_generation))
 	{
 		assert(d > DEPTH_NONE);
 		assert(d - DEPTH_NONE < 256);
 		assert(curr_generation <= GENERATION_MASK); // TT::new_search() plays nice
 
-        cluster->keys   = keys ^ (keyDiff << shift);
-        entry.depth8    = u8(d - DEPTH_NONE);
-        entry.genBound8 = u8(curr_generation | b << BOUND_SHIFT | u8(pv) << PV_SHIFT);
-        entry.value16   = i16(v);
-        entry.eval16    = i16(ev);
-    }
+		key       = TTE_KEY_TYPE(k);
+		depth8    = uint8_t(d - DEPTH_NONE);
+		genBound8 = uint8_t(curr_generation | b << BOUND_SHIFT | uint8_t(pv) << PV_SHIFT);
+		value16   = int16_t(v);
+		eval16    = int16_t(ev);
 
-    // Secondary aging. Important for elementary mate finding.
-    // (*Scaler) Secondary aging on entries relevant to singular extensions
-    // generally scales poorly and requires VVLTC verification.
+		// value,evalが適切な範囲であるか(やねうら王独自追加)
+		ASSERT_LV3(-VALUE_INFINITE <   v  && v < VALUE_INFINITE  ||  v == VALUE_NONE);
+		ASSERT_LV3(-VALUE_MAX_EVAL <= ev && ev <= VALUE_MAX_EVAL || ev == VALUE_NONE);
 
-	// 二次的なエイジング。基本的な詰みの発見に重要である。
-	// (*Scaler) Singular Extensionに関連するエントリに対する二次的なエイジングは、
-	// 一般にスケーリング特性が悪く、VVLTCによる検証が必要である。
+	}
+#if defined(YANEURAOU_ENGINE) || defined(EVAL_P2NNUE)
+	// ★SF port #2 "Secondary aging" (SF tt.cpp:122-134, commit 94beadffb3 + be9df38f27):
+	//   上書きしなかった (=既存エントリの方が価値が高い) ときでも、既存エントリが
+	//   「depth>=5 かつ bound が EXACT でなく、値が決着値 (詰み/詰まされ)」なら depth を 1 減らす。
+	//   詰み探索 (elementary mate finding) で古い非 EXACT の詰みスコアが居座るのを防ぐ。
+	//   決着値判定は我々の is_decisive() (|v| >= VALUE_TB_WIN_IN_MAX_PLY = VALUE_MATE - MAX_PLY)。
+	//   |v16| < VALUE_INFINITE のガードは racy な読み (VALUE_NONE 等) と is_decisive の assert 対策 (SF 原文どおり)。
+	//   depth8 は 0 (=未使用) で止める。エントリのレイアウトは不変。既定 OFF (SPSA::SF_TT_AGING=false) なら分岐 1 つのみ。
+	else if (SPSA::SF_TT_AGING && depth8 + DEPTH_NONE >= 5
+	         && Bound((genBound8 & BOUND_MASK) >> BOUND_SHIFT) != BOUND_EXACT)
+	{
+		const int v16 = value16;
 
-    else if (entry.depth8 + DEPTH_NONE >= 5
-             && Bound((entry.genBound8 & BOUND_MASK) >> BOUND_SHIFT) != BOUND_EXACT)
-    {
-        auto v16 = entry.value16;
-
-        // Guard against racy underflows, default to "unoccupied"
-        if (std::abs(v16) < VALUE_INFINITE && is_decisive(v16))
-            entry.depth8 = std::max(int(entry.depth8) - 1, 0);
-    }
-
+		// Guard against racy underflows, default to "unoccupied"
+		if (std::abs(v16) < VALUE_INFINITE && is_decisive(Value(v16)))
+			depth8 = uint8_t(std::max(int(depth8) - 1, 0));
+	}
+#endif
 }
-// Returns this entry's age. We count generations like clocks count hours,
-// i.e. we require 0 - 1 == 31. Unsigned subtraction guarantees the required
-// borrowing regardless of the upper pv/bound bits.
 
-// このエントリの世代差（age）を返す。時計が時刻を数えるのと同様に、世代を循環させて
-// 数える。つまり、0 - 1 == 31 となる必要がある。符号なし整数の減算により、
-// 上位のpv/boundビットに関係なく、必要な桁借りが保証される。
 
-u8 TTEntry::relative_age(const u8 curr_generation) const {
+uint8_t TTEntry::relative_age(const uint8_t curr_generation) const {
+	// Returns this entry's age. We count generations like clocks count hours,
+	// i.e. we require 0 - 1 == 31. Unsigned subtraction guarantees the required
+	// borrowing regardless of the upper pv/bound bits.
+
+	// このエントリのエイジを返します。世代を時計の時刻のように数えるため、
+	// 0 - 1 == 31 になる必要があります。符号なし減算により、上位のpv/boundビットに
+	// 関係なく必要な借り入れが保証されます。
+
 	return (curr_generation - genBound8) & GENERATION_MASK;
 }
 
@@ -254,70 +211,109 @@ u8 TTEntry::relative_age(const u8 curr_generation) const {
 // TTWriter is but a very thin wrapper around the pointer
 // TTWriterはポインタを包む非常に薄いラッパーに過ぎません
 
-TTWriter::TTWriter(Cluster* cl, int idx) :
-    cluster(cl),
-    index(idx) {}
+TTWriter::TTWriter(TTEntry* tte) :
+	entry(tte) {}
 
-// Flag a TTEntry as useless (decrementing the stored depth by the given penalty)
-// TTEntryを有用でないものとしてマークする（保存されているdepthから指定された
-// ペナルティ値を減算する）。
+#if STOCKFISH
+void TTWriter::write(
+  Key k, Value v, bool pv, Bound b, Depth d, Move m, Value ev, uint8_t generation8) {
+    entry->save(k, v, pv, b, d, m, ev, generation8);
+}
+#else
+
+void TTWriter::write(
+  const Key k_, Value v, bool pv, Bound b, Depth d, Move m, Value ev, uint8_t generation8) {
+
+#if HASH_KEY_BITS <= 64
+    const TTE_KEY_TYPE k = TTE_KEY_TYPE(k_);
+#else
+    const TTE_KEY_TYPE k = TTE_KEY_TYPE(k_.extract64<1>());
+#endif
+
+    entry->save(k, v, pv, b, d, m, ev, generation8);
+}
+#endif
+
+// ★SF port #2 (SF tt.cpp:157-159): Flag a TTEntry as useless (decrementing the stored depth by the given penalty)
+// 格納 depth を penalty だけ下げる。racy な underflow は 0 (=未使用) で止める (SF 原文どおり)。
 void TTWriter::penalize(int penalty) {
-    auto& entry = cluster->entry[index];
-    // Guard against racy underflows, default to "unoccupied"
-    entry.depth8 = std::max(int(entry.depth8) - penalty, 0);
+    entry->depth8 = uint8_t(std::max(int(entry->depth8) - penalty, 0));
 }
 
 
-// Sets the size of the transposition table, measured in megabytes.
-// Transposition table consists of clusters and each cluster consists
-// of ClusterSize number of TTEntry.
+// A TranspositionTable is an array of Cluster, of size clusterCount. Each cluster consists of ClusterSize number
+// of TTEntry. Each non-empty TTEntry contains information on exactly one position. The size of a Cluster should
+// divide the size of a cache line for best performance, as the cacheline is prefetched when possible.
 
-// 置換表のサイズをメガバイト単位で設定する。
-// 置換表は複数のClusterから構成され、各Clusterは
-// ClusterSize個のTTEntryから構成される。
+// TranspositionTableは、clusterCountのサイズを持つClusterの配列です。
+// 各クラスターはClusterSize個のTTEntryで構成されます。
+// 各非空のTTEntryは、正確に1つの局面に関する情報を含んでいます。
+// クラスターのサイズは、パフォーマンスを最大化するためにキャッシュラインのサイズを割り切れるべきです。
+// キャッシュラインは可能な場合にプリフェッチされます。
 
-#if STOCKFISH
-void TranspositionTable::resize(usize mbSize, ThreadPool& threads) {
-#else
-void TranspositionTable::resize(usize mbSize, ThreadPool& threads, bool force) {
+// ■ 補足情報
+//
+// StockfishではClusterSize == 3固定だが、やねうら王では、ビルドオプションで変更できるようになっている。
+//
+// 1クラスターにおけるTTEntryの数
+// TT_CLUSTER_SIZE == 2のとき、TTEntry 10bytes×3つ + 2(padding) =  32bytes
+// TT_CLUSTER_SIZE == 3のとき、TTEntry 16bytes×2つ + 0(padding) =  32bytes
+// TT_CLUSTER_SIZE == 4のとき、TTEntry 16bytes×4つ + 0(padding) =  64bytes
+// TT_CLUSTER_SIZE == 6のとき、TTEntry 16bytes×6つ + 0(padding) =  96bytes
+// TT_CLUSTER_SIZE == 8のとき、TTEntry 16bytes×8つ + 0(padding) = 128bytes
+
+static constexpr int ClusterSize = TT_CLUSTER_SIZE;
+
+struct Cluster {
+	TTEntry entry[ClusterSize];
+
+#if TT_CLUSTER_SIZE == 3
+	char    padding[2];  // Pad to 32 bytes
+						 // 全体を32byteぴったりにするためのpadding
 #endif
+};
+
+// static_assert(sizeof(Cluster) == 32, "Suboptimal Cluster size");
+static_assert((sizeof(Cluster) % 32) == 0, "Unexpected Cluster size");
+
+// Sets the size of the transposition table,
+// measured in megabytes. Transposition table consists
+// of clusters and each cluster consists of ClusterSize number of TTEntry.
+
+// トランスポジションテーブルのサイズをメガバイト単位で設定します。
+// トランスポジションテーブルはクラスターで構成されており、
+// 各クラスターはClusterSize個のTTEntryで構成されます。
+
+void TranspositionTable::resize(size_t mbSize, ThreadPool& threads) {
 #if STOCKFISH
     aligned_large_pages_free(table);
 
     clusterCount = mbSize * 1024 * 1024 / sizeof(Cluster);
 
-    usize ttBytes = clusterCount * sizeof(Cluster);
-
-    // Request 1GB pages if we'd get at least eight per NUMA node, to avoid
-    // memory oversubscription
-    bool hugePageHint = ttBytes >= threads.numa_nodes() * HugePageSize * 8;
-
-    table = static_cast<Cluster*>(aligned_large_pages_alloc_with_hint(ttBytes, hugePageHint));
-
-
 #else
 
 	// mbSizeの単位は[MB]なので、ここでは1MBの倍数単位のメモリが確保されるが、
 	// 仕様上は、1MBの倍数である必要はない。
-	usize newClusterCount = mbSize * 1024 * 1024 / sizeof(Cluster);
+	size_t newClusterCount = mbSize * 1024 * 1024 / sizeof(Cluster);
 
 	// clusterCountは偶数でなければならない。
-	// この理由については、TranspositionTable::get_cluster()のコメントを見よ。
-	// しかし、1024 * 1024 / sizeof(Cluster)の部分、sizeof(Cluster)==32なので、
+	// この理由については、TTEntry::first_entry()のコメントを見よ。
+	// しかし、1024 * 1024 / sizeof(Cluster)の部分、sizeof(Cluster)==64なので、
 	// これを掛け算するから2の倍数である。
 	ASSERT_LV3((newClusterCount & 1) == 0);
 
-	// 同じサイズなら再利用する。ただし、NUMA/スレッド構成の変更時は再配置する。
+	// 同じサイズなら確保しなおす必要はない。
 
 	// Stockfishのコード、問答無用で確保しなおしてゼロクリアしているが、
 	// ゼロクリアの時間も馬鹿にならないのであまり良いとは言い難い。
 
-	if (newClusterCount == clusterCount && !force)
+	if (newClusterCount == clusterCount)
 		return;
 
 	aligned_large_pages_free(table);
 
 	clusterCount = newClusterCount;
+#endif
 
 	// tableはCacheLineSizeでalignされたメモリに配置したいので、CacheLineSize-1だけ余分に確保する。
 	// callocではなくmallocにしないと初回の探索でTTにアクセスするとき、特に巨大なTTだと
@@ -327,8 +323,6 @@ void TranspositionTable::resize(usize mbSize, ThreadPool& threads, bool force) {
 	// Large Pageを確保する。ランダムメモリアクセスが5%程度速くなる。
 
 	table = static_cast<Cluster*>(aligned_large_pages_alloc(clusterCount * sizeof(Cluster)));
-
-#endif
 
 	if (!table)
 	{
@@ -344,67 +338,54 @@ void TranspositionTable::resize(usize mbSize, ThreadPool& threads, bool force) {
 #endif
 }
 
-// Initializes the entire transposition table to zero, in a multi-threaded way
+// Initializes the entire transposition table to zero,
+// in a multi-threaded way.
+
 // トランスポジションテーブル全体をマルチスレッドでゼロに初期化します。
 
 void TranspositionTable::clear(ThreadPool& threads) {
 
-#if !STOCKFISH
 #if defined(TANUKI_MATE_ENGINE) || defined(YANEURAOU_MATE_ENGINE)
 	// MateEngineではこの置換表は用いないのでクリアもしない。
 	return;
 #endif
-#endif
 
 	generation8 = 0;
 
-#if STOCKFISH
-	const usize threadCount = threads.num_threads();
+	// Stockfishのコード
+#if 0
+	const size_t threadCount = threads.num_threads();
 
-    std::vector<usize> threadToNuma = threads.get_bound_thread_to_numa_node();
+	for (size_t i = 0; i < threadCount; ++i)
+	{
+		threads.run_on_thread(i, [this, i, threadCount]() {
+			// Each thread will zero its part of the hash table
+			const size_t stride = clusterCount / threadCount;
+			const size_t start = stride * i;
+			const size_t len = i + 1 != threadCount ? stride : clusterCount - start;
 
-    std::vector<usize> order(threadCount);
-    std::iota(order.begin(), order.end(), 0);
+			std::memset(&table[start], 0, len * sizeof(Cluster));
+			});
+	}
 
-    // To promote good NUMA distribution (esp. with huge pages), we permute
-    // threads so that all threads in a NUMA node clear a contiguous region.
-    if (threadToNuma.size() == threadCount)
-        std::stable_sort(order.begin(), order.end(), [&threadToNuma](usize t1, usize t2) {
-            return threadToNuma.at(t1) < threadToNuma.at(t2);
-        });
-
-    for (usize i = 0; i < threadCount; ++i)
-    {
-        threads.run_on_thread(order[i], [this, i, threadCount]() {
-            // Each thread will zero its part of the hash table
-            const usize stride = clusterCount / threadCount;
-            const usize start  = stride * i;
-            const usize len    = i + 1 != threadCount ? stride : clusterCount - start;
-
-            std::memset(static_cast<void*>(&table[start]), 0, len * sizeof(Cluster));
-        });
-    }
-
-    for (usize i = 0; i < threadCount; ++i)
-        threads.wait_on_thread(i);
-
-#else
+	for (size_t i = 0; i < threadCount; ++i)
+		threads.wait_on_thread(i);
+#endif
 
 	auto size = clusterCount * sizeof(Cluster);
 
 	// 進捗を表示しながら並列化してゼロクリア
 	// Stockfishのここにあったコードは、独自の置換表を実装した時にも使いたいため、tt.cppに移動させた。
 	Tools::memclear(threads, "USI_Hash", table, size);
-#endif
 }
 
-// Returns an approximation of the hashtable occupation during a search.
-// The hash is x permill full, as per UCI protocol. Only counts entries
-// which are younger than maxAge.
+// Returns an approximation of the hashtable
+// occupation during a search. The hash is x permill full, as per UCI protocol.
+// Only counts entries which are younger than maxAge.
 
-// 探索中のハッシュテーブルの使用率の概算値を返す。
-// UCIプロトコルの仕様に従い、使用率は千分率で表す。
-// ageがmaxAgeより小さいエントリのみをカウントする。
+// 検索中のハッシュテーブルの占有率を概算して返します。
+// ハッシュはUCIプロトコルに従って、xパーミルで満たされています。
+// maxAgeより若いエントリのみをカウントします。
 
 int TranspositionTable::hashfull(int maxAge) const {
 	int cnt = 0;
@@ -416,8 +397,6 @@ int TranspositionTable::hashfull(int maxAge) const {
 	return cnt / ClusterSize;
 }
 
-// Must be called at the beginning of each root search to track entry aging
-// エントリのエイジングを管理するため、各ルート探索の開始時に呼び出す必要がある。
 void TranspositionTable::new_search() {
 
 	++generation8;
@@ -428,127 +407,80 @@ void TranspositionTable::new_search() {
 }
 
 
-// The current age, used when writing new data to the TT
-// 現在のage。TTに新しいデータを書き込む際に使用する。
-u8 TranspositionTable::generation() const { return generation8; }
+uint8_t TranspositionTable::generation() const { return generation8; }
 
-// Looks up the current position in the transposition table. Calling probe(key)
-// returns true if the key is found (which may be a collision) and has non-null
-// data. Otherwise, it returns false and a pointer to an empty or least valuable
-// TTEntry to be replaced later. The value of an entry is its depth minus 8 times
-// its relative age.
+// Looks up the current position in the transposition table.
+// It returns true if the key is found (which may be a collision), and has non-null data.
+// Otherwise, it returns false and a pointer to an empty or least valuable TTEntry
+// to be replaced later. The value of an entry is its depth minus 8 times its relative age.
 
-// 置換表から現在の局面を検索する。probe(key)を呼び出すと、キーが見つかり
-// （ハッシュ衝突の可能性もある）、かつデータが空でなければtrueを返す。
-// それ以外の場合はfalseを返し、後で置換するための、空のTTEntryまたは
-// 最も価値の低いTTEntryへのポインタを返す。エントリの価値は、そのdepthから
-// 相対的なageの8倍を引いた値である。
+// 現在の局面をトランスポジションテーブルで検索します。
+// キーが見つかり(衝突の可能性はあります)、データが空でない場合、trueを返します。
+// そうでない場合、falseと、後で置き換えるための空または最も価値の低いTTEntryへのポインタを返します。
+// エントリの価値は、その深さから相対的なエイジの8倍を引いたものとして計算されます。
 
 // 🌈 やねうら王独自拡張
 //    probe()してhitしたときに ttData.moveは Move16のままなので ttData.move32(pos)を用いて取得する必要がある。
 //    そこで、probe()の第2引数にPositionを渡すようにして、Move16ではなくMoveに変換されたTTDataを返すことにする。
 
-#if STOCKFISH
-std::tuple<bool, TTData, TTWriter> TranspositionTable::probe(const Key key) const {
-    Cluster* const cluster = get_cluster(key);
-
-#else
 std::tuple<bool, TTData, TTWriter> TranspositionTable::probe(const Key key, const Position& pos) const {
-    ASSERT_LV3((key & 1) == pos.side_to_move());
-    Cluster* const cluster = get_cluster(key);
-#endif
 
-    auto&          tte     = cluster->entry;
-    const u64      key21   = key & KeyMask;  // Use the low 21 bits as key inside the cluster
+    TTEntry* const tte = first_entry(key, pos.side_to_move());
 
-    constexpr u64 KeyLsb  = 1ULL | (1ULL << KeyBits) | (1ULL << 2 * KeyBits);
-    constexpr u64 KeyMsb  = KeyLsb << (KeyBits - 1);
-    const u64     keys    = cluster->keys;
-    const u64     keyXors = keys ^ (KeyLsb * key21);
-    // This bit twiddling trick will produce a one in the last (=most significant) bit of
-    // the first 21bit block matching key21. The bits before that first matching block will
-    // be all zeros, but after the first matching block there could be garbage.
-    const u64 matches = (keyXors - KeyLsb) & ~keyXors & KeyMsb;
-
-    if (matches)
-    {
-        static_assert(KeyBits == 21, "Index computation below assumes KeyBits == 21");
-        const int i = (int(lsb(matches)) >> 4) - 1;
-        // This gap is the main place for read races.
-        // After `read()` completes that copy is final, but may be self-inconsistent.
-		// このギャップが、読み取り競合の主な発生場所です。
-		// `read()`が完了した後、そのコピーは最終的なものですが、自己矛盾している可能性があります。
-
-#if STOCKFISH
-        return {tte[i].is_occupied(), tte[i].read(), TTWriter(cluster, i)};
+#if HASH_KEY_BITS <= 64
+    const TTE_KEY_TYPE key_for_ttentry = TTE_KEY_TYPE(key);
 #else
-		auto ttData = tte[i].read();
-		if (ttData.move)
-		{
-			// TTEntryにMoveが登録されていて、それを32bit化しようとして失敗したら、
-			// 置換表にhitしなかったという扱いにする。(99.99%ありえないのだが..)
-			Move move = pos.to_move(ttData.move.to_move16());
-			if (move)
-			{
-				ttData.move = move;
-				return { tte[i].is_occupied(), ttData, TTWriter(cluster, i) };
-			}
-		} else
-			// Move::none()が書き出されているentryはそのまま返す。
-	        return {tte[i].is_occupied(), ttData, TTWriter(cluster, i)};
-
-	    // 最初の候補の32bit化に失敗した場合だけ、後続を調べる。
-	    // (救済措置。非常にレアケースではあるが..)
-	    for (int j = i + 1; j < ClusterSize; ++j)
-	    {
-	        if (((keys >> (KeyBits * j)) & KeyMask) != key21)
-	            continue;
-
-	        auto data = tte[j].read();
-	        if (data.move)
-	        {
-	            Move move = pos.to_move(data.move.to_move16());
-	            if (!move)
-	                continue;
-
-	            data.move = move;
-	        }
-
-	        return {tte[j].is_occupied(), data, TTWriter(cluster, j)};
-		}
+    const TTE_KEY_TYPE key_for_ttentry = TTE_KEY_TYPE(key.extract64<1>());
 #endif
-    }
+
+	// Use the low 16 bits as key inside the cluster
+	// クラスター内で下位16ビットをキーとして使用します
+
+	for (int i = 0; i < ClusterSize; ++i)
+		if (tte[i].key == key_for_ttentry)
+
+			// This gap is the main place for read races.
+			// After `read()` completes that copy is final, but may be self-inconsistent.
+
+			// このギャップが、読み取り競合の主な発生場所です。
+			// `read()`が完了した後、そのコピーは最終的なものですが、自己矛盾している可能性があります。
+
+		{
+			auto ttData = tte[i].read();
+			if (ttData.move)
+			{
+				// TTEntryにMoveが登録されていて、それを32bit化しようとして失敗したら、
+				// 置換表にhitしなかったという扱いにする。
+				Move move = pos.to_move(ttData.move.to_move16());
+				if (!move)
+					continue;
+				ttData.move = move;
+			}
+			return { tte[i].is_occupied(), ttData, TTWriter(&tte[i]) };
+		}
 
 	// Find an entry to be replaced according to the replacement strategy
 	// 置換戦略に従って、置き換えるエントリを見つけます
 
-    int replace      = 0;
-    int replaceValue = tte[0].depth8 - 8 * tte[0].relative_age(generation8);
-    for (int i = 1; i < ClusterSize; ++i)
-    {
-        const int value = tte[i].depth8 - 8 * tte[i].relative_age(generation8);
-        if (replaceValue > value)
-        {
-            replace      = i;
-            replaceValue = value;
-        }
-    }
+	TTEntry* replace = tte;
+	for (int i = 1; i < ClusterSize; ++i)
+		if (replace->depth8 - 8 * replace->relative_age(generation8)
+			> tte[i].depth8 - 8 * tte[i].relative_age(generation8))
+			replace = &tte[i];
 
-    return {false, TTData{Move::none(), VALUE_NONE, VALUE_NONE, DEPTH_NONE, BOUND_NONE, false},
-            TTWriter(cluster, replace)};
+	return { false,
+			TTData{Move::none(), VALUE_NONE, VALUE_NONE, DEPTH_NONE, BOUND_NONE, false},
+			TTWriter(replace) };
 }
 
-// The hash function; its only external use is memory prefetching
-// ハッシュ関数。外部からはメモリのプリフェッチにのみ使用される。
-
-// keyを元にClusterのindexを求めて、そのCluster*を返す。
+// keyを元にClusterのindexを求めて、その最初のTTEntry*を返す。内部実装用。
 // ※　ここで渡されるkeyのbit 0は局面の手番フラグ(Position::side_to_move())であると仮定している。
 
-Cluster* TranspositionTable::get_cluster(const Key key) const {
+TTEntry* TranspositionTable::first_entry(const Key& key_, Color side_to_move) const {
 
 #if STOCKFISH
 
-    return &table[mul_hi64(key, clusterCount)];
+    return &table[mul_hi64(key, clusterCount)].entry[0];
 	// 💡 mul_hi64は、64bit * 64bitの掛け算をして下位64bitを取得する関数。
 
 	// key(64bit) × clusterCount / 2^64 の値は 0 ～ clusterCount - 1 である。
@@ -557,11 +489,32 @@ Cluster* TranspositionTable::get_cluster(const Key key) const {
 
 #else
 
+	// ⚠ Key128, Key256ならば、これで key_.extract64<0>() の意味になる。
+	// 🎯🎯**TT key の salt** (2026-10-22)。 root 色に依存する評価項 (`OwnBoardB` /
+	//   `OwnKnightAdv`) を入れると、 ponder で root 色が入れ替わったときに
+	//   **別の色で作った eval を再利用**してしまう。 -> root 色ごとに cluster を分ける。
+	//   🚨`g_tt_salt` は片側版の option が全部 0 なら **0** なので XOR は恒等 = bit-exact。
+	//   🚨**分離は確率的**: index(k) == index(k ^ SALT) が約 1/clusterCount あり、
+	//     そこでは key16 (低位 16bit / salt されない) が一致して色をまたいで hit しうる。
+	//   🚨ここ **1 箇所**で probe 6 箇所と prefetch 3 箇所が覆われる。 呼び出し側で
+	//     XOR すると 1 箇所漏らすだけで壊れる。 TTWriter は entry ポインタ経由で書くので
+	//     probe と自動的に整合する。
+	// 🏁**TT salt は 2026-10-28 に外した** (ユーザー指示)。 片側項 (OwnBoardB / K1) を
+	//   全部棄却したので `g_tt_salt` は常に 0 = XOR は恒等だった。 ここは probe 6 箇所 +
+	//   prefetch 3 箇所を覆う**最ホットパス**なので atomic load と XOR を消す。
+	//   🚨片側項を再び入れるなら salt を戻すこと (root 色をまたいだ eval の再利用を防ぐ)。
+#if 0
+	const Key64 key = Key64(key_)
+	                ^ Key64(Eval::P2NNUE::g_tt_salt.load(std::memory_order_relaxed));
+#else
+	const Key64 key = Key64(key_);
+#endif
+
 	/*
 		📓
 
 		やねうら王では、cluster indexのbit0(先後フラグ) に手番が反映される必要がある。
-		このときclusterCountが奇数だと、(index & ~(u64)1) | (key & 1) のようにしたときに、
+		このときclusterCountが奇数だと、(index & ~(u64)1) | side_to_move のようにしたときに、
 		(clusterCount - 1)が上限であるべきなのにclusterCountになりかねない。
 
 		そこでclusterCountは偶数であるという制約を課す。
@@ -571,13 +524,13 @@ Cluster* TranspositionTable::get_cluster(const Key key) const {
 	// 💡 key * clusterCount / 2^64 をするので、indexは 0 ～ clusterCount-1 の範囲となる。
 	uint64_t index = mul_hi64((u64)key, clusterCount);
 
-    // indexのbit0にキーの手番bitを埋め、先後のTTクラスタを分離する。
-    return &table[(index & ~1) | (key & 1)];
+	// indexは0～ clusterCount -1の範囲にある。このbit 0を手番に変更する。
+	// ⚠ Colorの実体はuint8で、0,1の値しか取らないものとする。
+	return &table[(index & ~1) | side_to_move].entry[0];
 
 #endif
 }
 
-#if !STOCKFISH
 // ----------------------------------
 //			UnitTest
 // ----------------------------------
@@ -594,10 +547,10 @@ void TranspositionTable::UnitTest(Test::UnitTester& unittest, IEngine& engine)
 
 		auto section2 = unittest.section("probe()");
 		Position pos;
+		StateInfo si;
+		pos.set_hirate(&si);
 
-		pos.set_hirate();
-
-		u64 posKey = u64(pos.key());
+		Key posKey = pos.key();
 		auto [ttHit, ttData, ttWriter] = tt.probe(posKey, pos);
 		for (int i = 0; i < 10; ++i)
 		{
@@ -626,6 +579,7 @@ void TranspositionTable::UnitTest(Test::UnitTester& unittest, IEngine& engine)
 		}
 	}
 }
-#endif
 
 } // namespace YaneuraOu
+
+//}  // namespace Stockfish

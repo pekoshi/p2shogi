@@ -1,12 +1,10 @@
-﻿#ifndef SEARCH_OPTIONS_H_INCLUDED
-#define SEARCH_OPTIONS_H_INCLUDED
+﻿#ifndef __SEARCH_OPTIONS_H_INCLUDED__
+#define __SEARCH_OPTIONS_H_INCLUDED__
 #include "../../config.h"
 
 #if defined(YANEURAOU_ENGINE_DEEP)
 
 #include "dlshogi_types.h"
-
-#include <cstddef>
 
 namespace dlshogi {
 
@@ -80,11 +78,6 @@ struct SearchOptions {
     // ※　探索rootでの訪問回数(move_count)がこれを超えたらhashfullとして探索を中止する。
     NodeCountType uct_node_limit = 10000000;
 
-#if defined(ENABLE_NN_CACHE)
-	// NN推論結果cacheの最大局面数。0なら無効。
-	size_t dnn_cache_size = 100000;
-#endif
-
     // エンジンオプションの"MultiPV"の値。
     ChildNumType multi_pv = 1;
 
@@ -108,4 +101,4 @@ struct SearchOptions {
 
 #endif // defined(YANEURAOU_ENGINE_DEEP)
 
-#endif // ndef SEARCH_OPTIONS_H_INCLUDED
+#endif // ndef __SEARCH_OPTIONS_H_INCLUDED__

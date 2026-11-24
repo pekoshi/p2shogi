@@ -6,7 +6,7 @@
 
 #include "../../../config.h"
 
-#if (defined(EVAL_NNUE) || defined(EVAL_SFNN))
+#if defined(EVAL_NNUE)
 
 #include "features_common.h"
 #include <array>
@@ -83,8 +83,8 @@ class FeatureSetBase {
   template <typename PositionType, typename IndexListType>
   static void AppendChangedIndices(
       const PositionType& pos, TriggerEvent trigger,
-      IndexListType removed[2], IndexListType added[2], bool reset[2],
-      const Eval::DirtyPiece& dp) {
+      IndexListType removed[2], IndexListType added[2], bool reset[2]) {
+    const auto& dp = pos.state()->dirtyPiece;
     if (dp.dirty_num == 0) return;
 
     for (const auto perspective : COLOR) {
@@ -116,7 +116,7 @@ class FeatureSetBase {
       } else {
         Derived::CollectChangedIndices(
             pos, trigger, perspective,
-            &removed[perspective], &added[perspective], dp);
+            &removed[perspective], &added[perspective]);
       }
     }
   }
@@ -135,7 +135,7 @@ class FeatureSet<FirstFeatureType, RemainingFeatureTypes...> :
 
  public:
   // 評価関数ファイルに埋め込むハッシュ値
-  static constexpr u32 kHashValue =
+  static constexpr std::uint32_t kHashValue =
       Head::kHashValue ^ (Tail::kHashValue << 1) ^ (Tail::kHashValue >> 31);
   // 特徴量の次元数
   static constexpr IndexType kDimensions =
@@ -173,13 +173,12 @@ class FeatureSet<FirstFeatureType, RemainingFeatureTypes...> :
   template <typename IndexListType>
   static void CollectChangedIndices(
       const Position& pos, const TriggerEvent trigger, const Color perspective,
-      IndexListType* const removed, IndexListType* const added,
-      const Eval::DirtyPiece& dp) {
-    Tail::CollectChangedIndices(pos, trigger, perspective, removed, added, dp);
+      IndexListType* const removed, IndexListType* const added) {
+    Tail::CollectChangedIndices(pos, trigger, perspective, removed, added);
     if (Head::kRefreshTrigger == trigger) {
       const auto start_removed = removed->size();
       const auto start_added = added->size();
-      Head::AppendChangedIndices(pos, perspective, removed, added, dp);
+      Head::AppendChangedIndices(pos, perspective, removed, added);
       for (auto i = start_removed; i < removed->size(); ++i) {
         (*removed)[i] += Tail::kDimensions;
       }
@@ -202,7 +201,7 @@ class FeatureSet<FeatureType> : public FeatureSetBase<FeatureSet<FeatureType>> {
  public:
   // Hash value embedded in the evaluation file
   // 評価関数ファイルに埋め込むハッシュ値
-  static constexpr u32 kHashValue = FeatureType::kHashValue;
+  static constexpr std::uint32_t kHashValue = FeatureType::kHashValue;
   // Number of feature dimensions
   // 特徴量の次元数
   static constexpr IndexType kDimensions = FeatureType::kDimensions;
@@ -236,10 +235,9 @@ class FeatureSet<FeatureType> : public FeatureSetBase<FeatureSet<FeatureType>> {
   // 特徴量のうち、一手前から値が変化したインデックスのリストを取得する
   static void CollectChangedIndices(
       const Position& pos, const TriggerEvent trigger, const Color perspective,
-      IndexList* const removed, IndexList* const added,
-      const Eval::DirtyPiece& dp) {
+      IndexList* const removed, IndexList* const added) {
     if (FeatureType::kRefreshTrigger == trigger) {
-      FeatureType::AppendChangedIndices(pos, perspective, removed, added, dp);
+      FeatureType::AppendChangedIndices(pos, perspective, removed, added);
     }
   }
 
@@ -252,6 +250,6 @@ class FeatureSet<FeatureType> : public FeatureSetBase<FeatureSet<FeatureType>> {
 } // namespace Eval::NNUE::Features
 } // namespace YaneuraOu
 
-#endif  // (defined(EVAL_NNUE) || defined(EVAL_SFNN))
+#endif  // defined(EVAL_NNUE)
 
 #endif // #ifndef NNUE_FEATURE_SET_H_INCLUDED

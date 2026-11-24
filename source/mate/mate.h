@@ -2,6 +2,16 @@
 #define MATE_H_INCLUDED
 
 #include "../types.h"
+
+// P2 aux+LE 計測用ガード:
+//   利き付き aux(board_effect 読み)のため LONG_EFFECT_LIBRARY を有効化すると、
+//   通常は mate1ply が with_effect 実装へ切り替わり探索木(nodes)が変化する
+//   (TT カスケード再発リスク)。P2_AUX_LE ビルドでは mate1ply を without_effect
+//   実装に固定し、探索木を LE-OFF と bit 一致させて棋力を保全する。
+#if (defined(P2_AUX_LE) || defined(P2_AUXCHEAP)) && !defined(P2_MATE1PLY_NOEFFECT)
+#define P2_MATE1PLY_NOEFFECT
+#endif
+
 #if defined (USE_MATE_1PLY)
 
 #include <vector>
@@ -27,7 +37,7 @@ namespace Mate {
 
 	// mate_1ply()の手番をtemplateにしたやつ。
 	template <Color Us>
-	SYSV_ABI Move mate_1ply_imp(const Position& pos);
+	Move mate_1ply_imp(const Position& pos);
 
 	// 利きのある場所への取れない近接王手からの3手詰め
 	// 詰みがある場合は、その1手目の指し手を返す。詰みがない場合は、MOVE_NONEが返る。
@@ -109,9 +119,9 @@ namespace Mate {
 		void unlock();
 
 		// このEntryに保存する。
-		void save(HASH_KEY board_key, Color root_color, /*Color side_to_move,*/ Hand hand, bool is_mate, u32 ply, Move move);
+		void save(Key board_key, Color root_color, /*Color side_to_move,*/ Hand hand, bool is_mate, u32 ply, Move move);
 
-		//void probe(HASH_KEY board_key, Color root_color);
+		//void probe(Key board_key, Color root_color);
 		// →　直接entry操作するので要らないや。
 
 	private:
@@ -142,7 +152,7 @@ namespace Mate {
 		// 与えられたboard_keyを持つMateHashEntryの先頭アドレスを返す。
 		// (現状、1つしか該当するエントリーはない)
 		// 取得したあと、lock()～unlock()して用いること。
-		MateHashEntry* first_entry(const HASH_KEY board_key, Color side_to_move) const;
+		MateHashEntry* first_entry(const Key board_key, Color side_to_move) const;
 
 		// 置換表のサイズを変更する。mbSize == 確保するメモリサイズ。MB単位。
 		// このあと呼び出し側でclear()を呼び出す必要がある。
@@ -275,7 +285,9 @@ namespace Mate::Dfpn
 
 		// 探索を終了させる。
 		// これで停止させる場合は、次回、明示的に dfpn_stop(false);としてから詰み探索を呼び出す必要がある。
-		virtual void dfpn_stop(const bool stop) { this->stop = stop; };
+		// ⚠ 別スレッドから呼ばれる(= 探索中の worker が読んでいる stop を書き換える)ので、
+		//    stop は std::atomic<bool>。順序保証は不要で可視性だけあればよいため relaxed。
+		virtual void dfpn_stop(const bool stop) { this->stop.store(stop, std::memory_order_relaxed); };
 
 		// mate_dfpn()でMOVE_NONE以外が返ってきた時にメモリが不足しているかを返す。
 		virtual bool is_out_of_memory() const= 0;
@@ -287,7 +299,11 @@ namespace Mate::Dfpn
 
 	protected:
 		// 停止フラグ。これがtrueになると停止する。
-		bool stop = false;
+		// ★std::atomic である必要がある: 書き手は停止要求を出す別スレッド(main thread)、
+		//   読み手は探索中の worker thread(mate_dfpn.hpp の探索ループ条件)。
+		//   plain bool だとデータ競合(UB)であり、最適化でループ外に巻き上げられると
+		//   worker が停止要求に気づかず join() がハングする。
+		std::atomic<bool> stop{false};
 	};
 
 	// DfpnのSolverの種類
@@ -364,6 +380,10 @@ namespace Mate::Dfpn
 
 		// hash使用率を1000分率で返す。
 		virtual int hashfull() const { return impl->hashfull(); }
+
+		// 🐛 基底の既定実装はこの「入れ物」側の stop メンバーを書き換えるだけで、
+		// 実装本体(impl)には伝わらない。別スレッドから協調停止させるために impl へ転送する。
+		virtual void dfpn_stop(const bool stop) { impl->dfpn_stop(stop); }
 
 	private:
 		std::unique_ptr<MateDfpnSolverInterface> impl;

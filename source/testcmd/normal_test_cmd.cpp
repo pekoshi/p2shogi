@@ -9,17 +9,12 @@
 #include <fstream>
 #include <iomanip>
 #include <sstream>
-#include "../attacks.h"
 #include "../position.h"
 #include "../usi.h"
 #include "../thread.h"
 #include "../search.h"
 #include "../movegen.h"
 #include "../evaluate.h"
-#include "unit_test.h"
-#if (defined(EVAL_NNUE) || defined(EVAL_SFNN))
-#include "../eval/nnue/nnue_test_command.h"
-#endif
 
 namespace YaneuraOu {
 namespace {
@@ -144,7 +139,9 @@ namespace {
 
 		for (uint64_t i = 0; i < loop ; ++i)
 		{
-			pos.set_hirate();
+			// 局面を遡るためのStateInfoのlist。
+			StateListPtr states(new StateList(1));
+			pos.set_hirate(&states->back());
 
 			if (verbose)
 				std::cout << "position startpos moves";
@@ -186,6 +183,10 @@ namespace {
 				}
 #endif
 
+				// Stockfish、start_thinking()のなかでstatesの所有権をstd::moveしてしまうので、コピーしておく。
+				// ※　start_thinking()でownership transferするの、こういうコードが書きにくくなって良くないと思う。
+				StateListPtr states0(new StateList(0));
+				*states0.get() = *states.get(); // dequeのcopyを行う。
 
 				// 思考時間、nodes_limit、1～4倍の間でランダム化
 				Search::LimitsType lm;
@@ -193,7 +194,7 @@ namespace {
 				lm.movetime = movetime * (1000 + prng.rand(3000)) / 1000;
 				lm.nodes    = nodes_limit * (1000 + prng.rand(3000)) / 1000;
 
-				threads.start_thinking(options, pos, lm);
+				threads.start_thinking(options, pos, states0 , lm);
 				threads.wait_for_search_finished();
 				auto& rootMoves = threads.main_thread()->worker->rootMoves;
 				// ⚠ best threadから選出したほうがいいかも知れないが、どれがbest threadか、わからない…。
@@ -219,7 +220,8 @@ namespace {
 				if (verbose)
 					std::cout << " " << m;
 
-				pos.do_move(m);
+				states->emplace_back();
+				pos.do_move(m, states->back());
 			}
 
 			if (verbose)
@@ -251,7 +253,9 @@ namespace {
 	// を継承する NNUE / KPPT / KPP_KKPT / Material 系のみ (= YANEURAOU_ENGINE が
 	// 定義される構成)。ふかうら王 (Deep)、tanuki/yaneuraou-mate、user-engine は
 	// Engine::evaluate() の基底実装 (VALUE_NONE を返す) のままで accuracy 算出が
-	// 無意味なため除外する。
+	// 無意味なため除外する。また YANEURAOU_ENGINE 配下では USE_SFEN_PACKER も
+	// 同時に定義されるので、PsvRecord / Position::set_from_packed_sfen への参照も
+	// このガード内で安全に行える。
 	void eval_accuracy(IEngine& engine, std::istringstream& is)
 	{
 		std::string psv_path;
@@ -291,7 +295,7 @@ namespace {
 		engine.isready();
 
 		auto& pos = engine.get_position();
-
+		StateInfo si;
 
 		uint64_t compared = 0;
 		uint64_t sign_match = 0;
@@ -304,7 +308,7 @@ namespace {
 		PsvRecord rec;
 		while (f.read(reinterpret_cast<char*>(&rec), sizeof(PsvRecord)))
 		{
-			if (pos.set_from_packed_sfen(rec.sfen, false, rec.gamePly).is_not_ok())
+			if (pos.set_from_packed_sfen(rec.sfen, &si, false, rec.gamePly).is_not_ok())
 			{
 				skipped++;
 				continue;
@@ -317,7 +321,7 @@ namespace {
 				continue;
 			}
 
-			// IEngine::evaluate() は内部で verify_network() + Eval::evaluate(pos) を
+			// IEngine::evaluate() は内部で verify_networks() + Eval::evaluate(pos) を
 			// 呼ぶ。NNUE accumulator は set_from_packed_sfen 後に invalid 状態に
 			// なっているはずなので、Eval::evaluate 側で full refresh される (= 通常の
 			// 探索開始時と同じ経路)。
@@ -375,14 +379,7 @@ namespace Test
 	bool normal_test_cmd(IEngine& engine , std::istringstream& is, const std::string& token)
 	{
 		if (token == "genmoves")              gen_moves(engine, is);       // 現在の局面に対して指し手生成のテストを行う。
-#if (defined(EVAL_NNUE) || defined(EVAL_SFNN))
-		else if (token == "nn")              Eval::NNUE::TestCommand(engine, is);
-#endif
-        else if (token == "sliding") {
-            UnitTester tester;
-            Attacks::test_sliding_attacks(tester);
-        }
-        else if (token == "autoplay")         auto_play(engine, is);       // 連続自己対局を行う。
+		else if (token == "autoplay")         auto_play(engine, is);       // 連続自己対局を行う。
 #if defined(YANEURAOU_ENGINE)
 		else if (token == "eval_accuracy")    eval_accuracy(engine, is);   // PSV に対し evaluate() の sign 一致率を測る。
 #endif

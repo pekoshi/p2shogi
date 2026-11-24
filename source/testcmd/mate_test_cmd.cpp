@@ -1,5 +1,4 @@
 ﻿#include "../config.h"
-#include "../extra/tools.h"
 
 #if defined(ENABLE_TEST_CMD)
 
@@ -9,7 +8,6 @@
 
 // "test genmate ..."のように"test"コマンドの後続コマンドとして書く。
 
-#include <fstream>
 #include <sstream>
 
 #include "../mate/mate.h"
@@ -197,8 +195,8 @@ namespace {
 
 				auto sfen = (*problems)[i];
 				sfen2 = sfen;
-
-				pos.set(sfen);
+				StateInfo si;
+				pos.set(sfen, &si);
 				Move move;
 				for (size_t j = 0; j < loop; ++j)
 				{
@@ -415,17 +413,18 @@ namespace {
 
 		for (const char* sfen : TestMateEngineSfen) {
 			Position pos;
-
-			pos.set(sfen);
+			StateListPtr st(new StateList(1));
+			pos.set(sfen, &st->back());
 
 			sync_cout << "\nPosition: " << sfen << sync_endl;
 
 			// 探索時にnpsが表示されるが、それはこのglobalなTimerに基づくので探索ごとにリセットを行なうようにする。
 			time.reset();
 
+			StateListPtr states(new std::deque<StateInfo>(1));
 
             limits.startTime = now();
-			threads.start_thinking(options, pos, limits);
+			threads.start_thinking(options, pos, st, limits);
 			threads.wait_for_search_finished(); // 探索の終了を待つ。
 
 			// TODO : あとで

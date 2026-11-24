@@ -48,30 +48,22 @@ namespace dlshogi {
 	void PvMateSearcher::SearchInner(Position& pos, Node* uct_node, ChildNode* child_node, bool root)
 	{
 		// 停止
-		if (stop || pos.game_ply() - dl_searcher->pos_root.game_ply() >= MAX_PLY) return;
-
-        // Cache the actual horizon, including the game's move limit.
-        // 対局の最大手数も含めた、実際の探索上限を記録する。
-        const int horizon = std::min(dl_searcher->search_options.max_moves_to_draw,
-                                     dl_searcher->pos_root.game_ply() + MAX_PLY - 1);
+		if (stop) return;
 
 		// いまから詰み探索済みフラグをチェックするのでlockが必要
 		Node::mtx_dfpn.lock();
 
 		// このnodeは詰み探索済みであるか？
-		if (!(uct_node->dfpn_proven_unsolvable || (uct_node->dfpn_checked
-            && uct_node->dfpn_horizon >= horizon)))
+		if (!(uct_node->dfpn_proven_unsolvable || uct_node->dfpn_checked))
 		{
 			// 詰み探索まだ。
 
 			// いったん詰み探索をしたことにする。(他のスレッドがこの局面を重複して探索しないように。)
 			uct_node->dfpn_checked = true;
-            uct_node->dfpn_horizon = horizon;
 			Node::mtx_dfpn.unlock();
 
 			// 詰みの場合、ノードを更新
-            dfpn.set_max_game_ply(horizon);
-            Move mate_move = dfpn.mate_dfpn(pos, nodes_limit);
+			Move mate_move = dfpn.mate_dfpn(pos, nodes_limit);
 			if (mate_move.is_ok()) {
 				// 詰みを発見した。
 
@@ -176,9 +168,9 @@ namespace dlshogi {
 			if (uct_node->child_nodes && uct_node->child_nodes[next_index])
 			{
 				// 1手進める。
-
+				StateInfo st;
 				Move m = uct_node->child[next_index].move;
-				pos.do_move(m);
+				pos.do_move(m, st);
 
 				// 再帰的に子を辿っていく。
 				SearchInner(pos, uct_next, &uct_node->child[next_index], false);
@@ -194,30 +186,22 @@ namespace dlshogi {
 	void PvMateSearcher::SearchInnerBFS(Position& pos, Node* uct_node, ChildNode* child_node, bool root, int depth)
 	{
 		// 停止
-		if (stop || pos.game_ply() - dl_searcher->pos_root.game_ply() >= MAX_PLY) return;
-
-        // Cache the actual horizon, including the game's move limit.
-        // 対局の最大手数も含めた、実際の探索上限を記録する。
-        const int horizon = std::min(dl_searcher->search_options.max_moves_to_draw,
-                                     dl_searcher->pos_root.game_ply() + MAX_PLY - 1);
+		if (stop) return;
 
 		// いまから詰み探索済みフラグをチェックするのでlockが必要
 		Node::mtx_dfpn.lock();
 
 		// このnodeは詰み探索済みであるか？
-		if (!(uct_node->dfpn_proven_unsolvable || (uct_node->dfpn_checked
-            && uct_node->dfpn_horizon >= horizon)))
+		if (!(uct_node->dfpn_proven_unsolvable || uct_node->dfpn_checked))
 		{
 			// 詰み探索まだ。
 
 			// いったん詰み探索をしたことにする。(他のスレッドがこの局面を重複して探索しないように。)
 			uct_node->dfpn_checked = true;
-            uct_node->dfpn_horizon = horizon;
 			Node::mtx_dfpn.unlock();
 
 			// 詰みの場合、ノードを更新
-            dfpn.set_max_game_ply(horizon);
-            Move mate_move = dfpn.mate_dfpn(pos, nodes_limit);
+			Move mate_move = dfpn.mate_dfpn(pos, nodes_limit);
 			if (is_ok(mate_move)) {
 				// 詰みを発見した。
 
@@ -316,10 +300,10 @@ namespace dlshogi {
 					continue;
 
 				// 1手進める。
-
+				StateInfo st;
 				Move m = uct_node->child[next_index].getMove();
 				sync_cout << to_usi_string(m) << sync_endl;
-				pos.do_move(m);
+				pos.do_move(m, st);
 
 				// 再帰的に子を辿っていく。
 				SearchInnerBFS(pos, uct_next, &uct_node->child[next_index], false, depth - 1);
@@ -335,15 +319,16 @@ namespace dlshogi {
 		// th == nullptrなら、poolしているthread自体がないのでとりあえず生成をする。
 		if (th == nullptr) {
 			th = new std::thread([&]() {
-                Position pos_copy;
 				while (!term_th) {
-                    auto& pos_root = dl_searcher->pos_root;
-                    pos_copy.copy_from(pos_root);
 					// 停止になるまで繰り返す
 					while (!stop) {
-                        // Root history was copied once for this search session.
-                        // この探索のルート以前の履歴は、開始時に一度だけコピー済み。
-                        pos_copy.reset_to_root(pos_root);
+						// 盤面のコピー
+						// Position pos_copy(*pos_root);
+						Position pos_copy;
+						auto& pos_root = dl_searcher->pos_root;
+						std::memcpy(&pos_copy, &pos_root, sizeof(Position));
+						// ⇨ pos_rootはglobalに存在していてかつimmutableと考えられるので、
+						// memcpyしても StateInfo* stが参照する先などは変わらず存在するから大丈夫。
 
 						// PV上の詰み探索
 						auto* tree = dl_searcher->get_node_tree();

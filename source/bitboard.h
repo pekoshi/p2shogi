@@ -1,32 +1,15 @@
-﻿#ifndef BITBOARD_H_INCLUDED
-#define BITBOARD_H_INCLUDED
-
-#include <algorithm>
-#include <cassert>
-#include <string>
+﻿#ifndef _BITBOARD_H_
+#define _BITBOARD_H_
 
 #include "types.h"
-#include "misc.h"
-
-#if !STOCKFISH
-#include <iosfwd>
-#endif
 
 namespace YaneuraOu {
 
-#if !STOCKFISH
-struct Bitboard;
-#endif
-
-namespace Bitboards {
-
-#if !STOCKFISH
+namespace Bitboards
+{
 	// Bitboard関連のテーブル初期化のための関数
 	void init();
-#endif
-std::string pretty(Bitboard b);
-
-} // namespace YaneuraOu::Bitboards
+}
 
 // --------------------
 //     Bitboard
@@ -286,24 +269,33 @@ struct alignas(16) Bitboard
 #pragma GCC diagnostic warning "-Wmaybe-uninitialized"
 #endif
 
+// p[n]を取り出す。SSE4の命令が使えるときはそれを使う。
 template <int n>
 inline u64 Bitboard::extract64() const
 {
 	static_assert(n == 0 || n == 1, "");
+#if defined(USE_SSE41)
+	return (u64)(_mm_extract_epi64(m, n));
+#else
 	return p[n];
+#endif
 }
 
 template <int n>
 inline Bitboard& Bitboard::insert64(u64 u)
 {
 	static_assert(n == 0 || n == 1, "");
+#if defined(USE_SSE41) && defined(IS_64BIT)
+	m = _mm_insert_epi64(m, u, n);
+	// ⇨ gcc/clangだと32bit環境で、この命令が定義されていなくてコンパイルエラーになる。
+	//		コンパイラ側のバグっぽい。仕方ないので、この命令を使うのは64bit環境の時のみにする。
+#else
 	p[n] = u;
+#endif
 	return *this;
 }
 
-// Overloads of bitwise operators between a Bitboard and a Square for testing
-// whether a given bit is set in a bitboard, and for setting and clearing bits.
-// 指定した升のビットの検査・設定・反転に使う、BitboardとSquare間のビット演算子。
+// Square型との演算子
 Bitboard operator|(const Bitboard& b, Square s);
 Bitboard operator&(const Bitboard& b, Square s);
 Bitboard operator^(const Bitboard& b, Square s);
@@ -318,6 +310,137 @@ const Bitboard end(const Bitboard&);
 
 // Bitboardの1の升を'*'、0の升を'.'として表示する。デバッグ用。
 std::ostream& operator<<(std::ostream& os, const Bitboard& board);
+
+// --------------------
+//     Bitboard256
+// --------------------
+
+// Bitboard 2つを256bit registerで扱う。
+// これをうまく用いると飛車、角の利きがmagic bitboardなしで求められる。
+// Qugiy[WCSC31]のアイデアの応用。
+
+struct alignas(32) Bitboard256
+{
+	// Bitboard 2つ分。
+#if defined (USE_AVX2)
+	union
+	{
+		// 64bitずつとして扱うとき用
+		u64 p[4];
+
+		__m256i m;
+	};
+#else // no SSE
+	u64 p[4];
+#endif
+
+	Bitboard256() {}
+#if defined (USE_AVX2)
+	Bitboard256& operator = (const Bitboard256& rhs) { _mm256_store_si256(&this->m, rhs.m); return *this; }
+	Bitboard256(const Bitboard256& bb) { _mm256_store_si256(&this->m, bb.m); }
+
+	// 同じBitboardを2つに複製し、それをBitboard256とする。
+	Bitboard256(const Bitboard& b1) { m = _mm256_broadcastsi128_si256(b1.m); }
+
+	// 2つのBitboardを合わせたBitboard256を作る。
+	Bitboard256(const Bitboard& b1, const Bitboard& b2) {
+		// m = _mm256_set_epi64x(b2.p[1],b2.p[0],b1.p[1],b1.p[0]);
+		m = _mm256_castsi128_si256(b1.m);        // 256bitにcast(上位は0)。これはcompiler向けの命令。
+		m = _mm256_inserti128_si256(m, b2.m, 1); // 上位128bitにb2.mを代入
+	}
+#else
+	Bitboard256(const Bitboard& b1, const Bitboard& b2) { p[0] = b1.p[0]; p[1] = b1.p[1]; p[2] = b2.p[0]; p[3]=b2.p[1]; }
+	Bitboard256(const Bitboard& b1) { p[0] = p[2] = b1.p[0]; p[1] = p[3] = b1.p[1]; }
+#endif
+
+#if defined (USE_AVX2)
+	Bitboard256& operator |= (const Bitboard256& b1) { this->m = _mm256_or_si256( m, b1.m); return *this; }
+	Bitboard256& operator &= (const Bitboard256& b1) { this->m = _mm256_and_si256(m, b1.m); return *this; }
+	Bitboard256& operator ^= (const Bitboard256& b1) { this->m = _mm256_xor_si256(m, b1.m); return *this; }
+	Bitboard256& operator += (const Bitboard256& b1) { this->m = _mm256_add_epi64(m, b1.m); return *this; }
+	Bitboard256& operator -= (const Bitboard256& b1) { this->m = _mm256_sub_epi64(m, b1.m); return *this; }
+
+	// 左シフト(縦型Bitboardでは左1回シフトで1段下の升に移動する)
+	// ※　シフト演算子は歩の利きを求めるためだけに使う。
+	Bitboard256& operator <<= (int shift) { /*ASSERT_LV3(shift == 1);*/ m = _mm256_slli_epi64(m, shift); return *this; }
+
+	// 右シフト(縦型Bitboardでは右1回シフトで1段上の升に移動する)
+	Bitboard256& operator >>= (int shift) { /*ASSERT_LV3(shift == 1);*/ m = _mm256_srli_epi64(m, shift); return *this; }
+
+	// and_not演算
+	// *this = (~*this) & b1;
+	// ただし、notする時に、将棋盤の81升以外のところもnotされるので注意。
+	// 自分自身は書き換えない。
+	Bitboard256 andnot(const Bitboard256& b1) const { Bitboard256 b0; b0.m = _mm256_andnot_si256(m, b1.m); return b0; }
+
+#else
+	Bitboard256& operator |= (const Bitboard256& b1) { this->p[0] |= b1.p[0]; this->p[1] |= b1.p[1]; this->p[2] |= b1.p[2]; this->p[3] |= b1.p[3]; return *this; }
+	Bitboard256& operator &= (const Bitboard256& b1) { this->p[0] &= b1.p[0]; this->p[1] &= b1.p[1]; this->p[2] &= b1.p[2]; this->p[3] &= b1.p[3]; return *this; }
+	Bitboard256& operator ^= (const Bitboard256& b1) { this->p[0] ^= b1.p[0]; this->p[1] ^= b1.p[1]; this->p[2] ^= b1.p[2]; this->p[3] ^= b1.p[3]; return *this; }
+	Bitboard256& operator += (const Bitboard256& b1) { this->p[0] += b1.p[0]; this->p[1] += b1.p[1]; this->p[2] += b1.p[2]; this->p[3] += b1.p[3]; return *this; }
+	Bitboard256& operator -= (const Bitboard256& b1) { this->p[0] -= b1.p[0]; this->p[1] -= b1.p[1]; this->p[2] -= b1.p[2]; this->p[3] -= b1.p[3]; return *this; }
+
+	Bitboard256& operator <<= (int shift) { /*ASSERT_LV3(shift == 1);*/ this->p[0] <<= shift; this->p[1] <<= shift; this->p[2] <<= shift; this->p[3] <<= shift; return *this; }
+	Bitboard256& operator >>= (int shift) { /*ASSERT_LV3(shift == 1);*/ this->p[0] >>= shift; this->p[1] >>= shift; this->p[2] >>= shift; this->p[3] >>= shift; return *this; }
+
+	Bitboard256 andnot(const Bitboard256& b1) const { Bitboard256 b0; b0.p[0] = ~p[0] & b1.p[0]; b0.p[1] = ~p[1] & b1.p[1]; b0.p[2] = ~p[2] & b1.p[2]; b0.p[3] = ~p[3] & b1.p[3]; return b0; }
+
+#endif
+
+	// 比較演算子
+
+	bool operator == (const Bitboard256& rhs) const;
+	bool operator != (const Bitboard256& rhs) const { return !(*this == rhs); }
+
+	// 2項演算子
+
+	Bitboard256 operator & (const Bitboard256& rhs) const { return Bitboard256(*this) &= rhs; }
+	Bitboard256 operator | (const Bitboard256& rhs) const { return Bitboard256(*this) |= rhs; }
+	Bitboard256 operator ^ (const Bitboard256& rhs) const { return Bitboard256(*this) ^= rhs; }
+	Bitboard256 operator + (const Bitboard256& rhs) const { return Bitboard256(*this) += rhs; }
+	Bitboard256 operator - (const Bitboard256& rhs) const { return Bitboard256(*this) -= rhs; }
+	Bitboard256 operator << (const int i) const { return Bitboard256(*this) <<= i; }
+	Bitboard256 operator >> (const int i) const { return Bitboard256(*this) >>= i; }
+
+	// その他の操作
+
+	// このBitboard256をBitboard2つに分離する。(デバッグ用)
+	void toBitboard(Bitboard& b1, Bitboard& b2) const { b1 = Bitboard(p[0], p[1]); b2 = Bitboard(p[2], p[3]); }
+
+	// byte単位で入れ替えたBitboardを返す。
+	// 飛車の利きの右方向と角の利きの右上、右下方向を求める時に使う。
+	Bitboard256 byte_reverse() const;
+
+	// SSE2のunpackを実行して返す。
+	// hi_out = _mm256_unpackhi_epi64(lo_in,hi_in);
+	// lo_out = _mm256_unpacklo_epi64(lo_in,hi_in);
+	static void unpack(const Bitboard256 hi_in,const Bitboard256 lo_in, Bitboard256& hi_out, Bitboard256& lo_out);
+
+	// 2組のBitboard256を、それぞれ64bitのhi×2とlo×2と見たときに(unpackするとそうなる)
+	// 128bit整数とみなして1引き算したBitboardを返す。
+	static void decrement(const Bitboard256 hi_in,const Bitboard256 lo_in, Bitboard256& hi_out, Bitboard256& lo_out);
+
+	// 保持している2つの盤面を重ね合わせた(ORした)Bitboardを返す。
+	Bitboard merge() const;
+
+	// UnitTest
+	static void UnitTest(Test::UnitTester& tester, IEngine& engine);
+};
+
+inline bool Bitboard256::operator == (const Bitboard256& rhs) const
+{
+#if defined (USE_AVX2)
+	__m256i neq = _mm256_xor_si256(this->m, rhs.m);
+	return /*_mm256_test_all_zeros*/ _mm256_testz_si256(neq, neq) ? true : false;
+#else
+	return (this->p[0] == rhs.p[0]) && (this->p[1] == rhs.p[1]) && (this->p[2] == rhs.p[2]) && (this->p[3] == rhs.p[3]);
+	// return (this->p[0] ^ rhs.p[0]) | (this->p[1] ^ rhs.p[1]) | (this->p[2] ^ rhs.p[2]) | (this->p[3] == rhs.p[3]);
+	// の方が速いかも？
+#endif
+}
+
+// Bitboard256の1の升を'*'、0の升を'.'として表示する。デバッグ用。
+std::ostream& operator<<(std::ostream& os, const Bitboard256& board);
 
 // --------------------
 //     Bitboard定数
@@ -363,9 +486,6 @@ namespace BB_Table
 	// 廃止 →　代わりにBitboard<1>()を用いる。	
 }
 
-// rank_bb() and file_bb() return a bitboard representing all the squares on
-// the given file or rank.
-// 指定した筋または段にある全升を表すBitboardを返す。
 static const Bitboard file_bb(File f) { return BB_Table::FILE_BB[f]; }
 static const Bitboard rank_bb(Rank r) { return BB_Table::RANK_BB[r]; }
 
@@ -388,6 +508,64 @@ static const Bitboard rank1_n_bb(Color US, const Rank r)
 // 敵陣を表現するBitboard。
 namespace BB_Table { extern const Bitboard EnemyField[COLOR_NB]; }
 static const Bitboard enemy_field(Color Us) { return BB_Table::EnemyField[Us]; }
+
+// 2升に挟まれている升を返すためのテーブル(その2升は含まない)
+// この配列には直接アクセスせずにbetween_bb()を使うこと。
+// 配列サイズが大きくてcache汚染がひどいのでシュリンクしてある。
+namespace BB_Table {
+	extern Bitboard BetweenBB[785];
+	extern u16 BetweenIndex[SQ_NB_PLUS1][SQ_NB_PLUS1];
+}
+
+// 2升に挟まれている升を表すBitboardを返す。sq1とsq2が縦横斜めの関係にないときはBitboard(ZERO)が返る。
+static const Bitboard between_bb(Square sq1, Square sq2) { return BB_Table::BetweenBB[BB_Table::BetweenIndex[sq1][sq2]]; }
+
+// 2升を通過する直線を返すためのテーブル
+// 2つ目のindexは[0]:右上から左下、[1]:横方向、[2]:左上から右下、[3]:縦方向の直線。
+// この配列には直接アクセスせず、line_bb()を使うこと。
+namespace BB_Table { extern Bitboard LineBB[SQ_NB][4]; }
+
+// 2升を通過する直線を返すためのBitboardを返す。sq1とsq2が縦横斜めの関係にないときに呼び出してはならない。
+static const Bitboard line_bb(Square sq1, Square sq2)
+{
+	static_assert(Effect8::DIRECT_RU == 0 && Effect8::DIRECT_LD == 7 , "");
+	auto directions = Effect8::directions_of(sq1, sq2);
+	ASSERT_LV3(directions != 0);
+	static const int a[8] = { 0 , 1 , 2 , 3 , 3 , 2 , 1 , 0 };
+	return BB_Table::LineBB[sq1][a[(int)Effect8::pop_directions(directions)]];
+}
+
+#if 0
+// →　高速化のために、Effect8::directions_ofを使って実装しているのでコメントアウト。(shogi.hにおいて)
+static bool aligned(Square s1, Square s2, Square s3) {
+	return LineBB[s1][s2] & s3;
+}
+#endif
+
+// sqの升にいる敵玉に王手となるc側の駒ptの候補を得るテーブル。第2添字は(pr-1)を渡して使う。
+// 直接アクセスせずに、check_candidate_bb()、around24_bb()を用いてアクセスすること。
+namespace BB_Table { extern Bitboard CheckCandidateBB[SQ_NB_PLUS1][KING - 1][COLOR_NB]; }
+
+// sqの升にいる敵玉に王手となるus側の駒ptの候補を得る
+// pr == ROOKは無条件全域なので代わりにHORSEで王手になる領域を返す。
+// pr == KINGで呼び出してはならない。それは、around24_bb()のほうを用いる。
+static const Bitboard check_candidate_bb(Color us, PieceType pr, Square sq)
+{
+	ASSERT_LV3(PAWN<= pr && pr < KING && sq <= SQ_NB && is_ok(us));
+	return BB_Table::CheckCandidateBB[sq][pr - 1][us];
+}
+
+#if defined(LONG_EFFECT_LIBRARY) // 詰みルーチンでは使わなくなったが、LONG_EFFECT_LIBRARYのなかで使っている。
+
+namespace BB_Table { extern Bitboard CheckCandidateKingBB[SQ_NB_PLUS1]; }
+
+// ある升の24近傍のBitboardを返す。
+static const Bitboard around24_bb(Square sq)
+{
+	ASSERT_LV3(sq <= SQ_NB);
+	return BB_Table::CheckCandidateKingBB[sq];
+}
+#endif
 
 // 歩が打てる筋が1になっているBitboardを返す。
 // pawns : いま歩を打とうとしている手番側の歩のBitboard
@@ -436,6 +614,54 @@ static Bitboard pawn_drop_mask(const Bitboard& pawns) {
 }
 
 
+// --------------------
+// 利きのためのテーブル
+// --------------------
+
+// 利きのためのライブラリ
+// 注意) ここのテーブルを直接参照せず、kingEffect()など、利きの関数を経由して用いること。
+
+// --- 近接駒の利き
+
+// 具体的なPiece名を指定することがほとんどなので1本の配列になっているメリットがあまりないので配列を分ける。
+// 外部から直接アクセスしないようにnamespaceに入れておく。
+namespace BB_Table
+{
+	extern Bitboard KingEffectBB[SQ_NB_PLUS1];
+	extern Bitboard GoldEffectBB[SQ_NB_PLUS1][COLOR_NB];
+	extern Bitboard SilverEffectBB[SQ_NB_PLUS1][COLOR_NB];
+	extern Bitboard KnightEffectBB[SQ_NB_PLUS1][COLOR_NB];
+	extern Bitboard PawnEffectBB[SQ_NB_PLUS1][COLOR_NB];
+
+	// 盤上の駒をないものとして扱う、遠方駒の利き。香、角、飛
+	extern Bitboard LanceStepEffectBB[SQ_NB_PLUS1][COLOR_NB];
+	extern Bitboard BishopStepEffectBB[SQ_NB_PLUS1];
+	extern Bitboard RookStepEffectBB[SQ_NB_PLUS1];
+}
+
+// =====================
+//   大駒・小駒の利き
+// =====================
+
+// --------------------
+//     近接駒の利き
+// --------------------
+
+// 歩の利き
+// c側の升sqに置いた歩の利き。
+template <Color c>
+inline Bitboard pawnEffect(Square sq)
+{
+	ASSERT_LV3(is_ok(c) && sq <= SQ_NB);
+	return BB_Table::PawnEffectBB[sq][c];
+}
+
+// 歩の利き、非template版。
+inline Bitboard pawnEffect(Color c, Square sq)
+{
+	return (c == BLACK) ? pawnEffect<BLACK>(sq) : pawnEffect<WHITE>(sq);
+}
+
 // 歩を複数配置したBitboardに対して、その歩の利きのBitboardを返す。
 // color = BLACKのとき、51の歩は49の升に移動するので、注意すること。
 // (51の升にいる先手の歩は存在しないので、歩の移動に用いる分には問題ないが。)
@@ -456,9 +682,397 @@ inline Bitboard pawnBbEffect(Color c, const Bitboard& bb)
 	return (c == BLACK) ? pawnBbEffect<BLACK>(bb) : pawnBbEffect<WHITE>(bb);
 }
 
-// Returns the squares attacked by pawns of the given color
-// from the squares in the given bitboard.
-// 指定した手番の歩が、渡されたBitboardの各升から利かせる升を返す。
+// 桂の利き
+// これは遮断されることはないのでOccupiedBitboard不要。
+inline Bitboard knightEffect(const Color c, const Square sq)
+{
+	ASSERT_LV3(is_ok(c) && sq <= SQ_NB);
+	return BB_Table::KnightEffectBB[sq][c];
+}
+
+// ↑のtemplate版。
+template <Color C>
+inline Bitboard knightEffect(const Square sq)
+{
+	ASSERT_LV3(is_ok(C) && sq <= SQ_NB);
+	return BB_Table::KnightEffectBB[sq][C];
+}
+
+// 銀の利き
+inline Bitboard silverEffect(const Color c, const Square sq)
+{
+	ASSERT_LV3(is_ok(c) && sq <= SQ_NB);
+	return BB_Table::SilverEffectBB[sq][c];
+}
+
+// ↑のtemplate版
+template <Color C>
+inline Bitboard silverEffect(const Square sq)
+{
+	ASSERT_LV3(is_ok(C) && sq <= SQ_NB);
+	return BB_Table::SilverEffectBB[sq][C];
+}
+
+// 金の利き
+inline Bitboard goldEffect(const Color c, const Square sq) {
+	ASSERT_LV3(is_ok(c) && sq <= SQ_NB);
+	return BB_Table::GoldEffectBB[sq][c];
+}
+
+// ↑のtemplate版
+template <Color C>
+inline Bitboard goldEffect(const Square sq) {
+	ASSERT_LV3(is_ok(C) && sq <= SQ_NB);
+	return BB_Table::GoldEffectBB[sq][C];
+}
+
+// 王の利き
+// 王の利きは先後の区別はない。
+inline Bitboard kingEffect(const Square sq)
+{
+	ASSERT_LV3(sq <= SQ_NB);
+	return BB_Table::KingEffectBB[sq];
+}
+
+// --------------------
+//  遠方駒のpseudoな利き
+// --------------------
+//
+//  遠方駒で、盤上には他に駒がないものとして求める利き。(pseudo-attack)
+//  関数名に"Step"とついているのは、pseudo-attackを意味する。
+// 
+
+// 盤上の駒を考慮しない香の利き
+inline Bitboard lanceStepEffect(Color c, Square sq) {
+	ASSERT_LV3(is_ok(c) && sq <= SQ_NB);
+	return BB_Table::LanceStepEffectBB[sq][c];
+}
+// ↑のtemplate版。
+template <Color C>
+inline Bitboard lanceStepEffect(Square sq) {
+	ASSERT_LV3(is_ok(C) && sq <= SQ_NB);
+	return BB_Table::LanceStepEffectBB[sq][C];
+}
+
+// 盤上の駒を考慮しない角の利き
+inline Bitboard bishopStepEffect(Square sq) {
+	ASSERT_LV3(sq <= SQ_NB);
+	return BB_Table::BishopStepEffectBB[sq];
+}
+
+// 盤上の駒を考慮しない飛車の利き
+inline Bitboard rookStepEffect(Square sq) {
+	ASSERT_LV3(sq <= SQ_NB);
+	return BB_Table::RookStepEffectBB[sq];
+}
+
+// 盤上の駒を考慮しない馬の利き
+inline Bitboard horseStepEffect(Square sq) {
+	ASSERT_LV3(sq <= SQ_NB);
+	// わざわざ用意するほどでもないので玉の利きと合成しておく。
+	return BB_Table::BishopStepEffectBB[sq] | BB_Table::KingEffectBB[sq];
+}
+
+// 盤上の駒を考慮しない龍の利き
+inline Bitboard dragonStepEffect(Square sq) {
+	ASSERT_LV3(sq <= SQ_NB);
+	// わざわざ用意するほどでもないので玉の利きと合成しておく。
+	return BB_Table::RookStepEffectBB[sq] | BB_Table::KingEffectBB[sq];
+}
+
+// 盤上の駒を考慮しないQueenの動き。
+inline Bitboard queenStepEffect(Square sq) {
+	ASSERT_LV3(sq <= SQ_NB);
+	return rookStepEffect(sq) | bishopStepEffect(sq);
+}
+
+// 縦横十字の利き 利き長さ=1升分。
+inline Bitboard cross00StepEffect(Square sq) {
+	ASSERT_LV3(sq <= SQ_NB);
+	return rookStepEffect(sq) & kingEffect(sq);
+}
+
+// 斜め十字の利き 利き長さ=1升分。
+inline Bitboard cross45StepEffect(Square sq) {
+	ASSERT_LV3(sq <= SQ_NB);
+	return bishopStepEffect(sq) & kingEffect(sq);
+}
+
+// --------------------
+//      遠方駒の利き
+// --------------------
+//
+// 遠方駒で、盤上の駒の状態を考慮しながら利きを求める。
+//
+
+// 香 : occupied bitboardを考慮しながら香の利きを求める
+template <Color C>
+inline Bitboard lanceEffect(Square sq, const Bitboard& occupied)
+{
+	ASSERT_LV3(is_ok(C) && sq <= SQ_NB);
+
+	// Bitboard 128bitのまま操作する。
+#if 0
+// これは、Qugiyのアイデア。
+// Quigy[WCSC31]の手法 : cf. https://www.apply.computer-shogi.org/wcsc31/appeal/Qugiy/appeal.pdf
+
+	if (C == WHITE)
+	{
+		// 9段目が0、その他の升が1になっているmask。
+		const Bitboard mask(0x3fdfeff7fbfdfeffULL, 0x000000000001feffULL);
+
+		// 駒が存在しない升が1となるmaskを作る。ただし9段目は0固定。
+		Bitboard em = occupied.andnot(mask);
+
+		// emに歩を利きを足すと2進数の足し算の繰り上がりによって利きが届く升まで1になっていく。(縦型Bitboard特有)
+		// 
+		// 【図解】
+		//  0 0 1 ... 1 : 駒が存在しない升が1、駒がある場所が0となっているmask。
+		//          ↑最下位bitがsqの升を意味しているとする。
+		//
+		//            : sqの升に1加算する
+		// 
+		//  0 1 0 ... 0 : 2進数の足し算をした結果、左のようになる。
+		//    ↑利きが届いた一番先の升が1。そこまでの桁は0になる。
+		//
+		// この結果を元のmaskとxorすることにより、bitの値が変化した場所(差分)が検出できる。
+		// bitが変化した場所は、利きが届いたということだから、それこそが求める利きであった。
+
+		// 同様の考え方で、角の2方向と飛車の左と下方向の利きは求まる。
+		// 角の残り2方向は、byte reverseして同じ考え方を適用できる。
+		// 飛車の右方向もbyte reverseして同じ考え方を適用できる。
+		// 飛車の上方向はbyte reverseでは解決しないので先手の香の利きと合成する。(飛車の下方向も、後手の香の利きを合成した方が手っ取り早い)
+
+		Bitboard t = em + pawnEffect<C>(sq);
+
+		// tとemの差分が香の利き
+		return t ^ em;
+
+	}
+	else {
+
+		// step effectなのでここで返ってくるBitboardのsqの升は0であることが保証されている。
+		const Bitboard se = lanceStepEffect<C>(sq);
+
+		// 香の利きがあるかも知れない範囲に対して、駒がある升だけ1にする。
+		Bitboard mocc = se & occupied;
+
+		// 1を上方向に8升上書きコピーしてやる。これで、駒がある升より上は1になる。
+		// 1になっていない升が、香の利きが通っている升ということになる。
+		mocc |= mocc >> 1;
+		mocc |= mocc >> 2;
+		mocc |= mocc >> 4;
+		mocc >>= 1;
+
+		return mocc.andnot(se);
+	}
+#endif
+
+#if 1
+	// Qugiyのアルゴリズムを1～7筋と8～9筋に分けたもの。
+	// こうすることで飛車の縦利きのコードがちょっと短くなる。
+	if (C == WHITE)
+	{
+		// 後手の香
+
+		if (Bitboard::part(sq) == 0)
+		{
+			// 香がp[0]に属する
+			/*
+			u64 mask = 0x3fdfeff7fbfdfeffULL;
+			u64 em = ~occupied.p[0] & mask;
+			u64 t = em + pawnEffect<C>(sq).p[0];
+			return Bitboard(t ^ em , 0);
+			*/
+			// ↑Qugiyのアルゴリズムをpart()を用いて書いたもの。
+			// ↓sqの次の升(＝歩の利き)に1加算する代わりに全体から1引く考え方。
+			//    こっちの方が、定数が一つ消せて良いと思う。
+
+			u64 mask = lanceStepEffect<WHITE>(sq).template extract64<0>();
+			u64 em = occupied.extract64<0>() & mask;
+			u64 t = em - 1; // 1引き算すれば、桁借りが上位桁が1のところまで波及する。
+			return Bitboard((em ^ t) & mask, 0);
+		}
+		else {
+			// 香がp[1]に属する
+			/*
+			u64 mask = 0x000000000001feffULL;
+			u64 em =  ~occupied.p[1] & mask;
+			u64 t = em + pawnEffect<C>(sq).p[1];
+			return Bitboard(0 , t ^ em );
+			*/
+
+			u64 mask = lanceStepEffect<WHITE>(sq).template extract64<1>();
+			u64 em = occupied.extract64<1>() & mask;
+			u64 t = em - 1;
+			return Bitboard(0, (em ^ t) & mask);
+		}
+	}
+	else {
+		// 先手の香
+
+		if (Bitboard::part(sq) == 0)
+		{
+			// 香がp[0]に属する
+			u64 se = lanceStepEffect<C>(sq).template extract64<0>();
+			u64 mocc = se & occupied.extract64<0>();
+			// 香が当たる駒より上の升に対応するビットを0、それ以外を1にする
+			mocc = ~uint64_t{0} << MSB64(mocc | 1);
+			return Bitboard(mocc & se, 0);
+		}
+		else {
+			// 香がp[1]に属する
+			u64 se = lanceStepEffect<C>(sq).template extract64<1>();
+			u64 mocc = se & occupied.extract64<1>();
+			mocc = ~uint64_t{0} << MSB64(mocc | 1);
+			return Bitboard(0, mocc & se);
+		}
+	}
+#endif
+}
+
+// 香の利き、非template版。
+inline Bitboard lanceEffect(Color c, Square sq, const Bitboard& occupied)
+{
+	return (c == BLACK) ? lanceEffect<BLACK>(sq, occupied) : lanceEffect<WHITE>(sq, occupied);
+}
+
+// 飛車の縦の利き(これはPEXTを用いていないのでどんな環境でも遅くはない)
+// 香の利きを求めるQugiyのコードを応用。
+inline Bitboard rookFileEffect(Square sq, const Bitboard& occupied)
+{
+	ASSERT_LV3(sq <= SQ_NB);
+
+	if (Bitboard::part(sq) == 0)
+	{
+		// 飛車がp[0]に属する
+
+		// 後手の香の利き
+		u64 mask = lanceStepEffect<WHITE>(sq).template extract64<0>();
+		u64 em = occupied.extract64<0>() & mask;
+		u64 t = em - 1; // 1引き算すれば、桁借りが上位桁が1のところまで波及する。
+
+		// 先手の香の利き
+		u64 se = lanceStepEffect<BLACK>(sq).template extract64<0>();
+		u64 mocc = se & occupied.extract64<0>();
+		mocc = ~uint64_t{0} << MSB64(mocc | 1);
+
+		// 後手の香の利きと先手の香の利きを合成
+		return Bitboard(((em ^ t) & mask) | (mocc & se), 0);
+	}
+	else {
+		// 飛車がp[1]に属する
+		// ↑の処理と同様。
+
+		u64 mask = lanceStepEffect<WHITE>(sq).template extract64<1>();
+		u64 em = occupied.extract64<1>() & mask;
+		u64 t = em - 1;
+
+		u64 se = lanceStepEffect<BLACK>(sq).template extract64<1>();
+		u64 mocc = se & occupied.extract64<1>();
+		mocc = ~uint64_t{0} << MSB64(mocc | 1);
+
+		return Bitboard(0, ((em ^ t) & mask) | (mocc & se));
+	}
+}
+
+// ==== 飛車と角の利き ===
+
+// 飛車の横の利き
+Bitboard rookRankEffect(Square sq, const Bitboard& occupied);
+
+// 飛車の利き
+inline Bitboard rookEffect(const Square sq, const Bitboard& occupied) {
+	// 縦の利きと横の利きを合成する。
+	return rookRankEffect(sq, occupied) | rookFileEffect(sq, occupied);
+}
+
+// 角の利き
+Bitboard bishopEffect(const Square sq, const Bitboard& occupied);
+
+// 馬の利き
+inline Bitboard horseEffect(Square sq, const Bitboard& occupied)
+{
+	return bishopEffect(sq, occupied) | kingEffect(sq);
+}
+
+// 龍の利き
+inline Bitboard dragonEffect(Square sq, const Bitboard& occupied)
+{
+	return rookEffect(sq, occupied) | kingEffect(sq);
+}
+
+// 角と飛車の利きはセットで用いることが多いので、
+// Queen(角+飛)の利きを(AVX512等で)求める関数を用意して、
+// rookStepEffectとbishopStepEffectで分解してしまう方が速いかも知れない。
+
+// === 大駒の部分利き(SEEなどで用いる) ===
+
+// sqの升から各方向への利き
+// 右上、右、右下、上方向は、byte_reverse()してあるので、普通の利きではないから注意。
+// 6方向しか使っていないので詰めてある。
+namespace BB_Table { extern Bitboard QUGIY_STEP_EFFECT[Effect8::DIRECT_NB - 2][SQ_NB_PLUS1]; }
+
+// 方向利き
+template <Effect8::Direct D>
+Bitboard rayEffect(Square sq, const Bitboard& occupied)
+{
+	// DIRECT_Uはbyte_reverse()しても正しく求められないからlanceEffectを用いる。
+	// DIRECT_Dも、lanceEffectにこれ専用の高速なコードが書いてあるのでそれを用いる。
+	if (D == Effect8::DIRECT_U) return lanceEffect<BLACK>(sq, occupied);
+	if (D == Effect8::DIRECT_D) return lanceEffect<WHITE>(sq, occupied);
+
+	ASSERT_LV3(D < Effect8::DIRECT_NB);
+
+	// 6方向しか使っていないのでテーブルを詰めてある。
+	const int dd = D > Effect8::DIRECT_D ? D - 2 : D;
+	const Bitboard mask = BB_Table::QUGIY_STEP_EFFECT[dd][sq];
+
+	// 右上、右、右下、上方向(Squareとしてみた時に、値が減る方向)
+	constexpr bool reverse =
+		   D == Effect8::DIRECT_RU
+		|| D == Effect8::DIRECT_R
+		|| D == Effect8::DIRECT_RD;
+
+	Bitboard bb = occupied;
+
+	if (reverse)
+		bb = bb.byte_reverse();
+
+	// 利きに関係する升のoccupiedだけを抽出
+	bb &= mask;
+	// 1減算することにより、利きが通る升までが変化する。
+	Bitboard bb_minus_one = bb.decrement();
+	// 変化したbitを抽出してmaskすれば出来上がり。
+	bb = (bb ^ bb_minus_one) & mask;
+
+	if (reverse)
+		bb = bb.byte_reverse();
+
+	return bb;
+}
+
+// sqの升から指定した方向dへの利き。盤上の駒も考慮する。
+Bitboard directEffect(Square sq, Effect8::Direct d, const Bitboard& occupied);
+
+// --------------------
+//   汎用性のある利き
+// --------------------
+
+// 盤上sqに駒pc(先後の区別あり)を置いたときの利き。(step effect)
+// pc == QUEENだと馬+龍の利きが返る。盤上には駒は何もないものとして考える。
+Bitboard effects_from(Piece pc, Square sq);
+
+// 盤上sqに駒pc(先後の区別あり)を置いたときの利き。
+// pc == QUEENだと馬+龍の利きが返る。
+Bitboard effects_from(Piece pc, Square sq, const Bitboard& occ);
+
+// --------------------
+//   Stockfishとの互換性のために用意
+// --------------------
+
+/// pawn_attacks_bb() returns the squares attacked by pawns of the given color
+/// from the squares in the given bitboard.
 
 // pawn_attacks_bb()は、手番C側の利き。
 // b : 手番C側の歩のBitboardを渡す。
@@ -469,6 +1083,41 @@ inline Bitboard pawn_attacks_bb(Bitboard b)
 	return pawnBbEffect<C>(b);
 }
 
+inline Bitboard pawn_attacks_bb(Color c, Square s)
+{
+	return pawnEffect(c, s);
+}
+
+
+/// attacks_bb(Square) returns the pseudo attacks of the give piece type
+/// assuming an empty board.
+
+// attacks_bb<PC>(s)は、駒PCをsの升に置いた時の利き。
+// ※　StockfishではPCのところ、PieceType Ptとなっているので注意
+// 盤上には駒はないものとする。
+
+template<Piece PC>
+inline Bitboard attacks_bb(Square s) {
+
+	return effects_from(PC, s);
+}
+
+/// attacks_bb(Square, Bitboard) returns the attacks by the given piece
+/// assuming the board is occupied according to the passed Bitboard.
+/// Sliding piece attacks do not continue passed an occupied square.
+
+// attacks_bb<PC>(s)は、駒PCをsの升に置いた時の利き。
+// ※　StockfishではPCのところ、PieceType Ptとなっているので注意
+// occupied : 盤上の駒
+
+template<Piece PC>
+inline Bitboard attacks_bb(Square s, Bitboard occupied) {
+
+	return effects_from(PC, s, occupied);
+}
+
+
+
 
 // Returns the least significant bit in a non-zero bitboard.
 // 0でないビットボードにおける最下位ビットを返す。
@@ -476,32 +1125,34 @@ inline Bitboard pawn_attacks_bb(Bitboard b)
 #if STOCKFISH
 inline Square lsb(Bitboard b) {
 #else
-inline i8 lsb(u64 b) {
+inline int8_t lsb(uint64_t b) {
 #endif
 	assert(b);
 
 #if defined(__GNUC__)  // GCC, Clang, ICX
 
-    return i8(__builtin_ctzll(b));
+    return int8_t(__builtin_ctzll(b));
 
 #elif defined(_MSC_VER)
     #ifdef _WIN64  // MSVC, WIN64
 
     unsigned long idx;
     _BitScanForward64(&idx, b);
-    return i8(idx);
+    return int8_t(idx);
 
     #else  // MSVC, WIN32
     unsigned long idx;
 
     if (b & 0xffffffff)
     {
-        _BitScanForward(&idx, i32(b));
-        return i8(idx);
+        _BitScanForward(&idx, int32_t(b));
+        return int8_t(idx);
     }
-
-    _BitScanForward(&idx, i32(b >> 32));
-    return i8(idx + 32);
+    else
+    {
+        _BitScanForward(&idx, int32_t(b >> 32));
+        return int8_t(idx + 32);
+    }
     #endif
 #else  // Compiler is neither GCC nor MSVC compatible
     #error "Compiler not supported."
@@ -514,20 +1165,20 @@ inline i8 lsb(u64 b) {
 #if STOCKFISH
 inline Square msb(Bitboard b) {
 #else
-inline i8 msb(u64 b) {
+inline int8_t msb(uint64_t b) {
 #endif
     assert(b);
 
 #if defined(__GNUC__)  // GCC, Clang, ICX
 
-    return i8(63 ^ __builtin_clzll(b));
+    return int8_t(63 ^ __builtin_clzll(b));
 
 #elif defined(_MSC_VER)
     #ifdef _WIN64  // MSVC, WIN64
 
     unsigned long idx;
     _BitScanReverse64(&idx, b);
-    return i8(idx);
+    return int8_t(idx);
 
     #else  // MSVC, WIN32
 
@@ -535,12 +1186,14 @@ inline i8 msb(u64 b) {
 
     if (b >> 32)
     {
-        _BitScanReverse(&idx, i32(b >> 32));
-        return i8(idx + 32);
+        _BitScanReverse(&idx, int32_t(b >> 32));
+        return int8_t(idx + 32);
     }
-
-    _BitScanReverse(&idx, i32(b));
-    return i8(idx);
+    else
+    {
+        _BitScanReverse(&idx, int32_t(b));
+        return int8_t(idx);
+    }
     #endif
 #else  // Compiler is neither GCC nor MSVC compatible
     #error "Compiler not supported."
@@ -548,10 +1201,10 @@ inline i8 msb(u64 b) {
 }
 
 
-// Returns the bitboard of the least significant
-// square of a non-zero bitboard. It is equivalent to square_bb(lsb(bb)).
-// 0でないBitboardの最下位の升だけを立てたBitboardを返す。
-// Stockfishではsquare_bb(lsb(bb))と等価で、将棋側では2つの64bit領域を考慮する。
+/// least_significant_square_bb() returns the bitboard of the least significant
+/// square of a non-zero bitboard. It is equivalent to square_bb(lsb(bb)).
+
+// pop_lsb()の、Bitboardを返す版。
 // ※　Stockfishとの互換性のために用意。
 
 inline Bitboard least_significant_square_bb(Bitboard b) {
@@ -566,4 +1219,4 @@ inline Bitboard least_significant_square_bb(Bitboard b) {
 
 } // namespace YaneuraOu
 
-#endif // #ifndef BITBOARD_H_INCLUDED
+#endif // #ifndef _BITBOARD_H_

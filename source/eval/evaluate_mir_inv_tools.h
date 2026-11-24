@@ -1,5 +1,5 @@
-﻿#ifndef EVALUATE_MIR_INV_TOOLS_H_INCLUDED
-#define EVALUATE_MIR_INV_TOOLS_H_INCLUDED
+﻿#ifndef _EVALUATE_MIR_INV_TOOLS_
+#define _EVALUATE_MIR_INV_TOOLS_
 
 // BonaPieceのmirror(左右反転)やinverse(盤上の180度回転)させた駒を得るためのツール類。
 
@@ -46,4 +46,4 @@ namespace Eval {
 } // namespace YaneuraOu
 
 #endif // defined(USE_EVAL_LIST)
-#endif // EVALUATE_MIR_INV_TOOLS_H_INCLUDED
+#endif // _EVALUATE_MIR_INV_TOOLS_

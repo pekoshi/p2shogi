@@ -1,14 +1,12 @@
 ﻿//#include <iostream>
 //#include "bitboard.h"
 //#include "position.h"
-#include "attacks.h"
-#include "misc.h"
-#include "extra/system_io.h"
 #include "search.h"
 #include "thread.h"
 #include "tt.h"
 #include "position.h"
 #include "usi.h"
+#include "misc.h"
 
 using namespace YaneuraOu;
 
@@ -50,7 +48,6 @@ int main(int argc, char* argv[])
 	// -- 全体的な初期化
 
 	Bitboards::init();
-	Attacks::init();
 	Position::init();
 
 	// 自作Engineのentry point(これはEngineFuncRegisterを用いて登録されている。)

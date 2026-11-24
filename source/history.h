@@ -1,13 +1,13 @@
 ﻿#ifndef HISTORY_H_INCLUDED
 #define HISTORY_H_INCLUDED
 
-#include <algorithm>
 #include <array>
+#include <memory>
 #include <atomic>
-#include <cassert>
+//#include <cassert>
 #include <cmath>
-#include <cstdint>
-#include <cstdlib>
+//#include <cstdint>
+//#include <cstdlib>
 #include <limits>
 #include <type_traits>  // IWYU pragma: keep
 // 📝 IWYU pragmaとは、Include What You Use（IWYU） というincludeを整理してくれるツールに対する指示コメント。
@@ -25,9 +25,9 @@ namespace YaneuraOu {
 
 // 歩の陣形に対するhistoryのサイズ
 constexpr int PAWN_HISTORY_BASE_SIZE   = 8192;  // has to be a power of 2
-constexpr int UINT_16_HISTORY_SIZE     = std::numeric_limits<u16>::max() + 1;
+constexpr int UINT_16_HISTORY_SIZE     = std::numeric_limits<uint16_t>::max() + 1;
 // correction historyのサイズ
-constexpr int CORRHIST_BASE_SIZE       = 2 * UINT_16_HISTORY_SIZE;
+constexpr int CORRHIST_BASE_SIZE       = UINT_16_HISTORY_SIZE;
 constexpr int CORRECTION_HISTORY_LIMIT = 1024;
 constexpr int LOW_PLY_HISTORY_SIZE     = 5;
 
@@ -36,6 +36,17 @@ static_assert((PAWN_HISTORY_BASE_SIZE & (PAWN_HISTORY_BASE_SIZE - 1)) == 0,
 
 static_assert((CORRHIST_BASE_SIZE & (CORRHIST_BASE_SIZE - 1)) == 0,
               "CORRHIST_BASE_SIZE has to be a power of 2");
+
+inline uint16_t pawn_correction_history_index(const Position& pos) { return uint16_t(pos.pawn_key()); }
+// 🌈 Stockfishではhash keyはuint64_tなので、そのままuint16_tにできるが、やねうら王では、
+//     Keyという構造体なので暗黙で64bitにすることはできない。ゆえに明示的なcastが必要となる。
+
+inline uint16_t minor_piece_index(const Position& pos) { return uint16_t(pos.minor_piece_key()); }
+
+template<Color c>
+inline uint16_t non_pawn_index(const Position& pos) {
+    return uint16_t(pos.non_pawn_key(c));
+}
 
 // StatsEntry is the container of various numerical statistics. We use a class
 // instead of a naked value to directly call history update operator<<() on
@@ -50,23 +61,31 @@ static_assert((CORRHIST_BASE_SIZE & (CORRHIST_BASE_SIZE - 1)) == 0,
 
 // T : このEntryの実体
 // D : abs(entry) <= Dとなるように制限される。
-// Shared : これがtrueなら、スレッド共有用のRelaxedAtomic版になる。
-template<typename T, int D, bool Shared = false>
+// Atomic : これがtrueなら、atomic版になる。
+template<typename T, int D, bool Atomic = false>
 struct StatsEntry {
 
-    static_assert(std::is_integral_v<T> && std::is_signed_v<T>, "Not a signed integer type");
-    static_assert(D > 0 && D <= std::numeric_limits<T>::max()
-                    && D <= std::numeric_limits<int>::max() / D,
-                  "D can lead to overflows");
+	static_assert(std::is_arithmetic_v<T>, "Not an arithmetic type");
 
    private:
-    // 共有しない場合はT、共有する場合はRelaxedAtomic<T>。
-    std::conditional_t<Shared, RelaxedAtomic<T>, T> entry;
+	// Atomic == Falseの時は普通のT、さもなくばstd::atomic<T>
+    std::conditional_t<Atomic, std::atomic<T>, T> entry;
+
 
    public:
-    void operator=(const T& v) { entry = v; }
+    void operator=(const T& v) {
+        if constexpr (Atomic)
+            entry.store(v, std::memory_order_relaxed);
+        else
+            entry = v;
+    }
 
-    operator T() const { return entry; }
+    operator T() const {
+        if constexpr (Atomic)
+            return entry.load(std::memory_order_relaxed);
+        else
+            return entry;
+    }
 
 	// このStatsEntry(Statsの1要素)に対して"<<"演算子でbonus値の加算が出来るようにしておく。
 	// 値が範囲外にならないように制限してある。
@@ -80,7 +99,7 @@ struct StatsEntry {
         T   val          = *this;
         *this            = val + clampedBonus - val * std::abs(clampedBonus) / D;
 
-        ASSERT_LV3(std::abs(T(*this)) <= D);
+        assert(std::abs(T(*this)) <= D);
 
 		// ※　この式は、Stockfishのコードそのまま。
 		// 試行錯誤の結果っぽくて、数学的な根拠はおそらくない。
@@ -103,6 +122,7 @@ struct StatsEntry {
 		// 📝 指数移動平均(EMA)みたいなことがしたい。
 		//     しかし、EMAだと制限Dを超えてしまうことがある。Dの範囲を守りながらEMAするには上記のような更新式になる。
 
+		ASSERT_LV3(std::abs(entry) <= D);
 	}
 };
 
@@ -111,10 +131,10 @@ enum StatsType {
 	Captures
 };
 
-template<typename T, int D, usize... Sizes>
+template<typename T, int D, std::size_t... Sizes>
 using Stats = MultiArray<StatsEntry<T, D>, Sizes...>;
 
-template<typename T, int D, usize... Sizes>
+template<typename T, int D, std::size_t... Sizes>
 using AtomicStats = MultiArray<StatsEntry<T, D, true>, Sizes...>;
 
 // DynStats is a dynamically sized array of Stats, used for thread-shared histories
@@ -129,40 +149,44 @@ using AtomicStats = MultiArray<StatsEntry<T, D, true>, Sizes...>;
 template<typename T, int SizeMultiplier>
 struct DynStats {
 	// s : スレッド数
-    explicit DynStats(usize s) :
-        size(s * SizeMultiplier),
-        data(make_unique_large_page<T[]>(size)) {}
+    explicit DynStats(size_t s) {
+		// この配列のサイズ
+        size = s * SizeMultiplier;
+
+		// 実際に確保される領域(T型でsize個)
+        data = make_unique_large_page<T[]>(size);
+    }
 
     // Sets all values in the range to 0
 	// すべての要素を0にする。
 	// 📓 並列で呼び出すことを想定している。threadIdxがthread id、numaTotalがthreadの総数。 
-    void clear_range(int value, usize threadIdx, usize numaTotal) {
-        usize start = u64(threadIdx) * size / numaTotal;
+    void clear_range(int value, size_t threadIdx, size_t numaTotal) {
+        size_t start = uint64_t(threadIdx) * size / numaTotal;
         assert(start < size);
 
 		// 最後のスレッドは、末尾まで。さもなくば、次のスレッドの開始点まで。
-        usize end = threadIdx + 1 == numaTotal ? size : u64(threadIdx + 1) * size / numaTotal;
+        size_t end = threadIdx + 1 == numaTotal ? size : uint64_t(threadIdx + 1) * size / numaTotal;
 
         while (start < end)
             data[start++].fill(value);
     }
 
 	// 確保されている配列のサイズ
-	usize get_size() const { return size; }
+	size_t get_size() const { return size; }
 
 	// 配列の要素へのaccessor
-	T&     operator[](usize index) {
+	T&     operator[](size_t index) {
         assert(index < size);
-        return data[index];
+        return data.get()[index];
     }
-    const T& operator[](usize index) const {
+    const T& operator[](size_t index) const {
         assert(index < size);
-        return data[index];
+        return data.get()[index];
     }
 
    private:
 	// 確保されている配列のsize
-    usize            size;
+    size_t            size;
 
 	// 確保されている配列の実体
     LargePagePtr<T[]> data;
@@ -180,7 +204,7 @@ struct DynStats {
 // 詳細は https://www.chessprogramming.org/Butterfly_Boards を参照してください。
 // 💡 簡単に言うと、fromの駒をtoに移動させることに対するhistory。
 
-using ButterflyHistory = Stats<i16, 7183, COLOR_NB, UINT_16_HISTORY_SIZE>;
+using ButterflyHistory = Stats<std::int16_t, 7183, COLOR_NB, UINT_16_HISTORY_SIZE>;
 
 /*
 	 📓 上記のような配列、将棋では添字順を入れ替えて、history[c][to]をhistory[to][c]としたい。
@@ -213,17 +237,17 @@ using ButterflyHistory = Stats<i16, 7183, COLOR_NB, UINT_16_HISTORY_SIZE>;
 // ルート付近での手順の順序を改善するために使用されます。
 // 💡 ply とは 探索開始局面からの手数のこと。
 
-using LowPlyHistory = Stats<i16, 7183, LOW_PLY_HISTORY_SIZE, UINT_16_HISTORY_SIZE>;
+using LowPlyHistory = Stats<std::int16_t, 7183, LOW_PLY_HISTORY_SIZE, UINT_16_HISTORY_SIZE>;
 
 // CapturePieceToHistory is addressed by a move's [piece][to][captured piece type]
 // CapturePieceToHistoryは、指し手の [piece][to][captured piece type]で示される。
 
-using CapturePieceToHistory = Stats<i16, 10692, PIECE_NB, SQUARE_NB, PIECE_TYPE_NB>;
+using CapturePieceToHistory = Stats<std::int16_t, 10692, PIECE_NB, SQUARE_NB, PIECE_TYPE_NB>;
 
 // PieceToHistory is like ButterflyHistory but is addressed by a move's [piece][to]
 // PieceToHistoryは、ButterflyHistoryに似たものだが、指し手の[piece][to]で示される。
 
-using PieceToHistory = AtomicStats<i16, 30000, PIECE_NB, SQUARE_NB>;
+using PieceToHistory = Stats<std::int16_t, 30000, PIECE_NB, SQUARE_NB>;
 
 // ContinuationHistory is the combined history of a given pair of moves, usually
 // the current one given a previous one. The nested history table is based on
@@ -240,7 +264,57 @@ using ContinuationHistory = MultiArray<PieceToHistory, PIECE_NB, SQUARE_NB>;
 // ※　歩の陣形に対するhistory。
 
 using PawnHistory =
-  DynStats<AtomicStats<i16, 8192, PIECE_NB, SQUARE_NB>, PAWN_HISTORY_BASE_SIZE>;
+  DynStats<AtomicStats<std::int16_t, 8192, PIECE_NB, SQUARE_NB>, PAWN_HISTORY_BASE_SIZE>;
+
+// DropContHistory: 駒打ち(drop) quiet 手専用の Continuation History。
+// 既存 ContinuationHistory が絶対マスの [prevPiece][prevTo]->[piece][to] を学習するのに対し、
+// こちらは「drop 升を敵玉からの相対位置」で持つことで、玉位置をまたいで汎化する新シグナルを与える。
+// キーを直接 index 化(hash 衝突なし): 2(color) × 7(drop駒種1..7) × 16(直前駒種0..15)
+//   × 17(相対file+8) × 17(相対rank+8) = 64,736 < 65536。
+inline constexpr size_t DROP_CONT_HIST_SIZE = 65536;
+using DropContHistory = Stats<std::int16_t, 8192, DROP_CONT_HIST_SIZE>;
+
+// drop_cont_index: DropContHistory のインデックスを計算する。
+//   us       : 手番(打つ側)
+//   dropPt   : 打つ駒種 (PAWN=1 .. ROOK=6, GOLD=7)
+//   prevPt   : 直前手の移動先にある駒種 (type_of(pos.piece_on(prevSq)), 0..15)
+//   dropTo   : 打つ升
+//   enemyKing: 敵玉の升 (pos.square<KING>(~us))
+inline int drop_cont_index(Color us, PieceType dropPt, PieceType prevPt, Square dropTo, Square enemyKing) {
+    int rf = int(file_of(dropTo)) - int(file_of(enemyKing)) + 8;  // 0..16
+    int rr = int(rank_of(dropTo)) - int(rank_of(enemyKing)) + 8;  // 0..16
+    int di = (int(dropPt) - 1) & 7;                               // 0..6
+    int pi = int(prevPt) & 15;                                    // 0..15
+    return ((((int(us) * 7 + di) * 16 + pi) * 17 + rf) * 17 + rr);
+}
+
+// ---- Threat Continuation History (Phase B) ----
+// Null Move 探索(cutoffせず)後に null 局面 TT から得た相手有力手 threatMove の分類。
+enum class ThreatClass : uint8_t { None, DropCheck, Check, Capture, Promotion, KingZone, Other };
+
+// ThreatHistory: threatMove(相手の脅威)文脈での、成功した quiet response を学習する固定長ハッシュ History。
+// キー = (手番, threatClass, threat駒, threat先升, response駒, response先升)。DropContHistory と同じ雛形。
+inline constexpr size_t THREAT_HISTORY_SIZE = 1 << 15;   // 32768
+using ThreatHistory = Stats<std::int16_t, 8192, THREAT_HISTORY_SIZE>;
+
+// threat 文脈部(手番/threatClass/threat駒/threat先升)を先に乗算ハッシュで混ぜる。node 毎に一度算出。
+inline uint32_t threat_history_context(Color side, ThreatClass tc, Piece threatPc, Square threatTo) {
+    uint32_t k = uint32_t(side);
+    k = k * 0x9E3779B1u + uint32_t(tc);
+    k = k * 0x85EBCA77u + uint32_t(threatPc);
+    k = k * 0xC2B2AE3Du + uint32_t(threatTo);
+    return k;
+}
+// response部(response駒/response先升)を混ぜた pre-mask の 32bit フルキー(衝突計測用)。
+inline uint32_t threat_history_fullkey(uint32_t ctx, Piece responsePc, Square responseTo) {
+    uint32_t k = ctx * 0x27D4EB2Fu + uint32_t(responsePc);
+    k = k * 0x165667B1u + uint32_t(responseTo);
+    return k;
+}
+// response部を混ぜて index 化(衝突許容)。= fullkey & (SIZE-1)。
+inline uint32_t threat_history_index(uint32_t ctx, Piece responsePc, Square responseTo) {
+    return threat_history_fullkey(ctx, responsePc, responseTo) & (THREAT_HISTORY_SIZE - 1);
+}
 
 // Correction histories record differences between the static evaluation of
 // positions and their search score. It is used to improve the static evaluation
@@ -251,11 +325,14 @@ using PawnHistory =
 // これは、一部の探索ヒューリスティックで使用される静的評価を改善するために用いられる。
 
 enum CorrHistType {
+    Pawn,          // By color and pawn structure
+    Minor,         // By color and positions of minor pieces (Knight, Bishop)
+    NonPawn,       // By non-pawn material positions and color
     PieceTo,       // By [piece][to] move
     Continuation,  // Combined history of move pairs
 };
 /*
-	📓 UnifiedCorrectionHistoryが保持する補正履歴と、CorrHistTypeの分類
+	📓 CorrHistType(Correction History Type)
 
 		Pawn         : 歩の陣形(先後の区別はする)に対するもの
 		Minor        : minor piece(小駒。先後の区別はする)に対するもの。将棋では、香、桂、銀、金とその成り駒。
@@ -265,31 +342,46 @@ enum CorrHistType {
 */
 
 // Correction Historyのひとまとめにしたもの。
-// 歩、小駒、先後それぞれの歩以外の駒に対する補正。
+// 歩、小駒、後手の大駒、先手の大駒
 template<typename T, int D>
 struct CorrectionBundle {
     StatsEntry<T, D, true> pawn;
     StatsEntry<T, D, true> minor;
     StatsEntry<T, D, true> nonPawnWhite;
     StatsEntry<T, D, true> nonPawnBlack;
+    StatsEntry<T, D, true> hand;   // 将棋用: 持ち駒構成(先後の手駒)に対する correction。既存テーブルに同居。
+#if defined(P2_KHCORR)
+    // 2026-11-12 KHCORR (DESIGN-20261112-OPTIMISM 案①): 玉近傍の危険度 x 浮き駒の数 (144 通り) に対する
+    //   correction。 鍵 0..143 で correctionHistory を直接添字する (= 先頭 144 entry の kh 欄だけを使う)。
+    //   🚨この欄があると entry が 20B -> 24B に増える (値は不変だが cache の踏み方が変わる)。
+    //   だから -DP2_KHCORR のビルドにだけ置く。
+    StatsEntry<T, D, true> kh;
+#endif
 
-    // 各メンバーを同じ値で初期化する。
-    void fill(T val) {
+	// メンバーにまとめて代入するoperator
+    void operator=(T val) {
         pawn         = val;
         minor        = val;
         nonPawnWhite = val;
         nonPawnBlack = val;
+        hand         = val;
+#if defined(P2_KHCORR)
+        kh           = val;
+#endif
     }
 };
 
 namespace Detail {
 
 template<CorrHistType>
-struct CorrHistTypedef;
+struct CorrHistTypedef {
+    using type =
+      DynStats<Stats<std::int16_t, CORRECTION_HISTORY_LIMIT, COLOR_NB>, CORRHIST_BASE_SIZE>;
+};
 
 template<>
 struct CorrHistTypedef<PieceTo> {
-    using type = Stats<i16, CORRECTION_HISTORY_LIMIT, PIECE_NB, SQUARE_NB>;
+    using type = Stats<std::int16_t, CORRECTION_HISTORY_LIMIT, PIECE_NB, SQUARE_NB>;
 };
 
 template<>
@@ -297,23 +389,23 @@ struct CorrHistTypedef<Continuation> {
     using type = MultiArray<CorrHistTypedef<PieceTo>::type, PIECE_NB, SQUARE_NB>;
 };
 
+template<>
+struct CorrHistTypedef<NonPawn> {
+    using type = DynStats<Stats<std::int16_t, CORRECTION_HISTORY_LIMIT, COLOR_NB, COLOR_NB>,
+                          CORRHIST_BASE_SIZE>;
+};
 
 }
 
 using UnifiedCorrectionHistory =
-  DynStats<CorrectionBundle<i16, CORRECTION_HISTORY_LIMIT>, CORRHIST_BASE_SIZE>;
+  DynStats<MultiArray<CorrectionBundle<std::int16_t, CORRECTION_HISTORY_LIMIT>, COLOR_NB>,
+           CORRHIST_BASE_SIZE>;
 
 
 template<CorrHistType T>
 using CorrectionHistory = typename Detail::CorrHistTypedef<T>::type;
 
-using TTMoveHistory = StatsEntry<i16, 8192>;
-
-// The continuation histories are shared within a NUMA node and allocated on large pages.
-// continuation historyはNUMAノード内で共有し、large pageへ確保する。
-struct ContinuationHistoryBlock {
-    ContinuationHistory table[2][2];
-};
+using TTMoveHistory = StatsEntry<std::int16_t, 8192>;
 
 
 // Set of histories shared between groups of threads. To avoid excessive
@@ -327,25 +419,34 @@ struct ContinuationHistoryBlock {
 // 渡される size は、インデックス計算をより効率的にするため、
 // 2 の冪である必要があります。
 
+// p2shogi 2026-11-01: continuation history を thread 間で共有するための器。
+//   Stockfish 2026-06-14 (PR #6905) が 8T 5+0.05 / 8T 20+0.2 / 16T / 64T の 4 本で通した方式。
+//   🚨やねうら王は thread ごとに持っており、 作者自身が「この改造、 レーティングがほぼ
+//     上がっていない。 悪い改造のような気がする」とコメントしている (search.h の宣言部)。
+//   🚨実体は 1 組 53.7 MB。 std::map<NumaIndex, SharedHistories> の値に直接置くと
+//     map の再配置で巨大なコピーが起きるので unique_ptr でヒープに置く。
+//   🚨構築時に必ず確保する (clear() から遅延確保すると thread 並列で data race になる)。
+struct ContHist2x2 {
+    ContinuationHistory h[2][2];   // [inCheck][capture_stage]
+};
+
 struct SharedHistories {
-    SharedHistories(usize threadCount) :
+    SharedHistories(size_t threadCount) :
         correctionHistory(threadCount),
-        continuationHistoryBlock(make_unique_large_page<ContinuationHistoryBlock>()),
-        pawnHistory(threadCount) {
+        pawnHistory(threadCount),
+        contHist(std::make_unique<ContHist2x2>()) {
         assert((threadCount & (threadCount - 1)) == 0 && threadCount != 0);
         sizeMinus1         = correctionHistory.get_size() - 1;
         pawnHistSizeMinus1 = pawnHistory.get_size() - 1;
     }
 
-    auto& continuationHistory() { return continuationHistoryBlock->table; }
-
-    usize get_size() const { return sizeMinus1 + 1; }
+    size_t get_size() const { return sizeMinus1 + 1; }
 
     auto& pawn_entry(const Position& pos) {
-        return pawnHistory[pos.pawn_key() >> 1 & pawnHistSizeMinus1];
+        return pawnHistory[pos.pawn_key() & pawnHistSizeMinus1];
     }
     const auto& pawn_entry(const Position& pos) const {
-        return pawnHistory[pos.pawn_key() >> 1 & pawnHistSizeMinus1];
+        return pawnHistory[pos.pawn_key() & pawnHistSizeMinus1];
     }
 
     auto& pawn_correction_entry(const Position& pos) {
@@ -354,6 +455,20 @@ struct SharedHistories {
     const auto& pawn_correction_entry(const Position& pos) const {
         return correctionHistory[pos.pawn_key() & sizeMinus1];
     }
+
+    // 将棋用: 持ち駒構成(先後の手駒 Zobrist = hand_key)に対する correction entry。
+    auto& hand_correction_entry(const Position& pos) {
+        return correctionHistory[pos.hand_key() & sizeMinus1];
+    }
+    const auto& hand_correction_entry(const Position& pos) const {
+        return correctionHistory[pos.hand_key() & sizeMinus1];
+    }
+
+#if defined(P2_KHCORR)
+    // KHCORR: 鍵 key (0..143, kh_corr_key() の値) の entry。 鍵は 144 < get_size() なので mask 不要。
+    auto&       kh_correction_entry(int key) { return correctionHistory[key]; }
+    const auto& kh_correction_entry(int key) const { return correctionHistory[key]; }
+#endif
 
     auto& minor_piece_correction_entry(const Position& pos) {
         return correctionHistory[pos.minor_piece_key() & sizeMinus1];
@@ -371,12 +486,13 @@ struct SharedHistories {
         return correctionHistory[pos.non_pawn_key(c) & sizeMinus1];
     }
 
-    UnifiedCorrectionHistory               correctionHistory;
-    LargePagePtr<ContinuationHistoryBlock> continuationHistoryBlock;
-    PawnHistory                            pawnHistory;
+    UnifiedCorrectionHistory correctionHistory;
+    PawnHistory              pawnHistory;
+    // p2shogi 2026-11-01: 共有 continuation history (SPSA_SHARED_CONT_HIST=1 のときだけ使う)。
+    std::unique_ptr<ContHist2x2> contHist;
 
    private:
-    usize sizeMinus1, pawnHistSizeMinus1;
+    size_t sizeMinus1, pawnHistSizeMinus1;
 };
 
 

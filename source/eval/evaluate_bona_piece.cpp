@@ -5,6 +5,7 @@ using namespace std;
 namespace YaneuraOu {
 namespace Eval {
 
+#if defined (USE_PIECE_VALUE)
 
 	// 駒の価値
     int PieceValue[PIECE_NB] =
@@ -59,6 +60,7 @@ namespace Eval {
 			+ (move.is_promote() ? (Value)ProDiffPieceValue[pos.piece_on(move.from_sq())] : VALUE_ZERO);
 	}
 
+#endif // defined (USE_PIECE_VALUE)
 
 #if defined(USE_EVAL_LIST)
 

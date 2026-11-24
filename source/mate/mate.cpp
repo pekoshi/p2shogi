@@ -1,12 +1,9 @@
 ﻿#include "mate.h"
-#include "../extra/tools.h"
 #if defined (USE_MATE_1PLY)
 #include "../position.h"
 #include "../movegen.h"
 
 namespace YaneuraOu {
-
-using namespace Attacks;
 namespace Mate {
 
 // 1手詰めテーブルの初期化関数
@@ -42,6 +39,8 @@ Move weak_mate_3ply(const Position& pos, int ply) {
     // const剥がし
     Position* This = ((Position*) &pos);
 
+    StateInfo si;
+    StateInfo si2;
 
     // 近接王手で味方の利きがあり、敵の利きのない場所を探す。
     for (auto em : MoveList<CHECKS>(pos))
@@ -52,8 +51,9 @@ Move weak_mate_3ply(const Position& pos, int ply) {
         Square to = m.to_sq();
         if ((around8 & to)
 
-#if !defined(LONG_EFFECT_LIBRARY)
+#if !defined(LONG_EFFECT_LIBRARY) || defined(P2_MATE1PLY_NOEFFECT)
             // toに利きがあるかどうか。mが移動の指し手の場合、mの元の利きを取り除く必要がある。
+            // (P2_MATE1PLY_NOEFFECT: LONG_EFFECT 有効でも board_effect を使わず LE-OFF と同一判定)
             && (m.is_drop()
                   ? pos.effected_to(us, to)
                   : (bool) (pos.attackers_to(us, to, pos.pieces() ^ m.from_sq()) ^ m.from_sq()))
@@ -77,7 +77,7 @@ Move weak_mate_3ply(const Position& pos, int ply) {
 
             ASSERT_LV3(pos.gives_check(m));
 
-            This->do_move(m, true);
+            This->do_move(m, si, true);
 
             ASSERT_LV3(pos.in_check());
 
@@ -91,7 +91,7 @@ Move weak_mate_3ply(const Position& pos, int ply) {
                 if (pos.gives_check(m2))
                     goto NEXT_CHECK;
 
-                This->do_move(m2, false);
+                This->do_move(m2, si2, false);
 
                 ASSERT_LV3(!pos.in_check());
 
@@ -156,8 +156,7 @@ MateRepetitionState mate_repetition(const Position& pos,
             break;
 
         default :
-            ASSERT_LV3(false);
-            sf_unreachable();
+            UNREACHABLE;
         }
 
         if (plies_from_root < repetition_ply)
@@ -179,8 +178,7 @@ MateRepetitionState mate_repetition(const Position& pos,
                 break;
 
             default :
-                ASSERT_LV3(false);
-                sf_unreachable();
+                UNREACHABLE;
             }
         }
     }
@@ -204,8 +202,7 @@ MateRepetitionState mate_repetition(const Position& pos,
             break;
 
         default :
-            ASSERT_LV3(false);
-            sf_unreachable();
+            UNREACHABLE;
         }
 
         if (plies_from_root < repetition_ply)
@@ -226,8 +223,7 @@ MateRepetitionState mate_repetition(const Position& pos,
                 break;
 
             default :
-                ASSERT_LV3(false);
-                sf_unreachable();
+                UNREACHABLE;
             }
         }
     }
@@ -241,7 +237,7 @@ MateRepetitionState mate_repetition(const Position& pos,
 // ---------------------
 
 // このEntryに保存する。
-void MateHashEntry::save(HASH_KEY                          board_key,
+void MateHashEntry::save(Key                          board_key,
                          Color                        root_color,
                          /*Color side_to_move,*/ Hand hand,
                          bool                         is_mate,
@@ -314,7 +310,7 @@ void MateHashEntry::unlock() { mutex = false; }
 
 // 与えられたboard_keyを持つMateHashEntryの先頭アドレスを返す。
 // (現状、1つしか該当するエントリーはない)
-MateHashEntry* MateHashTable::first_entry(const HASH_KEY board_key, Color side_to_move) const {
+MateHashEntry* MateHashTable::first_entry(const Key board_key, Color side_to_move) const {
     uint64_t index = mul_hi64((u64) board_key >> 1, entryCount);
     return &table[(index << 1) | side_to_move];
 }

@@ -1,5 +1,5 @@
-﻿#ifndef ALL_H_INCLUDED
-#define ALL_H_INCLUDED
+﻿#ifndef __ALL_H_INCLUDED__
+#define __ALL_H_INCLUDED__
 
 // すべてのheaderを読み込むheader
 // 実験時などで手っ取り早くすべてのheaderを読み込んでしまいたいときに使う。
@@ -10,7 +10,6 @@
 #include <fstream>
 
 #include "../types.h"
-#include "../attacks.h"
 #include "../bitboard.h"
 #include "../position.h"
 #include "../search.h"
@@ -28,4 +27,4 @@
 // これもおまけしておく。
 using namespace std;
 
-#endif // ndef ALL_H_INCLUDED
+#endif // ndef __ALL_H_INCLUDED__

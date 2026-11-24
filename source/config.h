@@ -1,13 +1,6 @@
 ﻿#ifndef CONFIG_H_INCLUDED
 #define CONFIG_H_INCLUDED
 
-// NUMAなどで使うWindows 7以降のAPIを、最初のWindowsヘッダーから宣言させる。
-// ヘッダーを読み込んだ後で対象バージョンを上げても、宣言は追加されない。
-#if defined(_WIN32) && (!defined(_WIN32_WINNT) || _WIN32_WINNT < 0x0601)
-    #undef _WIN32_WINNT
-    #define _WIN32_WINNT 0x0601
-#endif
-
 // ============================================================
 //
 //  やねうら王プロジェクト
@@ -21,16 +14,9 @@
 // ただし、この値を数値として使用することがあるので数値化できる文字列にしておく必要がある。
 #if !defined(ENGINE_VERSION)
 
-#define ENGINE_VERSION "9.96git"
+#define ENGINE_VERSION "9.40git"
 
 #endif
-// USE_LAZY_EVALUATE: 未指定なら無効、-Dのみなら1（従来動作）。
-// 2以上なら、対応するNNUE特徴量で計算済み累積器を最大その手数まで遡る。
-// 従来型評価関数では、値によらず従来どおり有効・無効だけを切り替える。
-#if defined(USE_LAZY_EVALUATE) && USE_LAZY_EVALUATE < 1
-    #error USE_LAZY_EVALUATE must be a positive integer; omit it to disable lazy evaluation
-#endif
-
 // --------------------
 //  思考エンジンの種類
 // --------------------
@@ -95,8 +81,17 @@
 // #define YANEURAOU_ENGINE
 
 
+// Position::see()を用いるか。これはSEE(Static Exchange Evaluation : 静的取り合い評価)の値を返す関数。
+// #define USE_SEE
+
+
 // Timerクラスに、今回の思考時間を計算する機能を追加するか。
 // #define USE_TIME_MANAGEMENT
+
+
+// MovePickerを使うのか(Stockfish風のコード)
+// ※　通常探索部以外では使わないので、切り離せるようになっている。
+// #define USE_MOVE_PICKER
 
 
 // Position classにcorrection historyで用いるような
@@ -150,9 +145,9 @@
 // EVAL_SFNNを使うときはdefineしてはならない。
 // #define USE_CLASSIC_EVAL
 
-// StateInfoに駒割り評価値を保持し、局面設定時の計算とdo_move()時の差分更新を行う。
-// 駒価値テーブル・SEE・MovePickerは、この指定によらず利用できる。
-// #define USE_MATERIAL_VALUE
+// 駒の価値のテーブルを使うか。(Apery WCSC26の定義)
+// Eval::PieceValueなどが使えるようになる。
+//#define USE_PIECE_VALUE
 
 // do_move()のときに移動した駒の管理をして差分計算
 // 1. 駒番号を管理しているpiece_listについて
@@ -180,7 +175,7 @@
 // 通例hash keyは64bitだが、これを128にするとPosition::state()->long_key()から128bit hash keyが
 // 得られるようになる。研究時に局面が厳密に合致しているかどうかを判定したいときなどに用いる。
 // 実験用の機能なので、128bit,256bitのhash keyのサポートはAVX2のみ。
-// Positionのキーを128bit,256bitにした場合も、TTには下位64bitを渡す。
+// これ、128 or 256bitにすると、置換表に用いるhashのkeyにそれを使えるので置換表のhash衝突ちょっと減る。
 // 注意 : ふかうら王で、スーパーテラショック定跡の生成を行う時は、HASH_KEY_BITSを128に設定すること。
 //#define HASH_KEY_BITS 64
 
@@ -193,6 +188,23 @@
 // これを4にすると、1つのTTEntryが64byteになる。いまどきのPCならCPUのcache line sizeが64byteであるため、
 // 速度低下はほぼないはず。
 //#define TT_CLUSTER_SIZE 3
+
+// ---------------------
+//  機械学習関連の設定
+// ---------------------
+
+
+// sfenを256bitにpackする機能、unpackする機能を有効にする。
+// これをdefineするとPosition::packe_sfen(),unpack_sfen()が使えるようになる。
+// ※　機械学習関連で局面の読み書きをする時に使う。
+// #define USE_SFEN_PACKER
+
+
+// 置換表のprobeに必ず失敗する設定
+// ※　 自己生成棋譜からの学習でqsearch()のPVが欲しいときに
+// 置換表にhitして枝刈りされたときにPVが得られないの悔しいので。
+// #define USE_FALSE_PROBE_IN_TT
+
 
 // ---------------------
 //  詰将棋ルーチン関係の設定
@@ -229,7 +241,7 @@
 //  高速化に関する設定
 // ---------------------
 
-// トーナメント(大会)用のビルド。最新CPU(いまはAVX2)用。TEST_CMD使用不可。ASSERTなし。
+// トーナメント(大会)用のビルド。最新CPU(いまはAVX2)用でEVAL_HASH大きめ。TEST_CMD使用不可。ASSERTなし。
 // #define FOR_TOURNAMENT
 
 // ---------------------
@@ -341,7 +353,8 @@
 // 定義してもビルドエラーになる。
 // #define STOCKFISH
 
-// SFNN_XXXはEVAL_SFNN、NNUE_XXXはEVAL_NNUEとして排他的に構成する。
+// SFNNwoPSQT型の評価関数を使うときに定義するシンボル。(Makefileのなかで定義している)
+// #define SFNNwoPSQT
 
 // ===============================================================
 // ここ以降では、↑↑↑で設定した内容に基づき必要なdefineを行う。
@@ -361,29 +374,30 @@ constexpr int MAX_PLY_NUM = 246;
 
 // --- 通常の思考エンジンとして実行ファイルを公開するとき用の設定集
 
-#if defined(YANEURAOU_ENGINE_KPPT) || defined(YANEURAOU_ENGINE_KPP_KKPT) || defined(YANEURAOU_ENGINE_NNUE) || defined(YANEURAOU_ENGINE_MATERIAL) || defined(YANEURAOU_ENGINE_SFNN)
+#if defined(YANEURAOU_ENGINE_KPPT) || defined(YANEURAOU_ENGINE_KPP_KKPT) || defined(YANEURAOU_ENGINE_NNUE) || defined(YANEURAOU_ENGINE_MATERIAL) || defined(YANEURAOU_ENGINE_P2NNUE)
 
 	#define YANEURAOU_ENGINE
-	#if !defined(YANEURAOU_ENGINE_SFNN)
-		#define USE_CLASSIC_EVAL
-	#endif
+	#define USE_CLASSIC_EVAL
 	#define USE_PARTIAL_KEY
-	#define USE_MATERIAL_VALUE
+	#define USE_PIECE_VALUE
+	#define USE_SEE
 	#define USE_EVAL_LIST
 	#define USE_MATE_1PLY
 	#define USE_MATE_SOLVER
 	#define USE_MATE_DFPN
 	#define USE_TIME_MANAGEMENT
+	#define USE_MOVE_PICKER
 	#define USE_EVAL
 
 	// 定跡関連コマンド
 	#define ENABLE_MAKEBOOK_CMD
+	#define USE_SFEN_PACKER
 
-	#if defined(YANEURAOU_ENGINE_KPPT) || defined(YANEURAOU_ENGINE_KPP_KKPT) || defined(YANEURAOU_ENGINE_NNUE) || defined(YANEURAOU_ENGINE_SFNN)
+	#if defined(YANEURAOU_ENGINE_KPPT) || defined(YANEURAOU_ENGINE_KPP_KKPT) || defined(YANEURAOU_ENGINE_NNUE)
 		#define USE_DIFF_EVAL
 	#endif
 
-	#if (defined(YANEURAOU_ENGINE_NNUE) || defined(YANEURAOU_ENGINE_SFNN)) && !defined(NNUE_EMBEDDING)
+	#if defined(YANEURAOU_ENGINE_NNUE) && !defined(NNUE_EMBEDDING)
 		// 📝 Stockfishでは、NNUE_EMBEDDING_OFFを定義した時にのみ、
 		//    評価関数パラメーターをファイルから読みこむ機能が有効になる。
 		//    (定義しないとincbinを用いて埋め込まれているものを読み込む)
@@ -397,6 +411,8 @@ constexpr int MAX_PLY_NUM = 246;
 	//#define USE_DEBUG_ASSERT
 
 	#define ENABLE_TEST_CMD
+	// 学習絡みのオプション
+	#define USE_SFEN_PACKER
 
 	// 定跡生成絡み
 	#define ENABLE_MAKEBOOK_CMD
@@ -428,12 +444,8 @@ constexpr int MAX_PLY_NUM = 246;
 		#define EVAL_KPP_KKPT
 	#endif
 
-	#if (defined(YANEURAOU_ENGINE_NNUE) || defined(YANEURAOU_ENGINE_SFNN))
-		#if defined(YANEURAOU_ENGINE_SFNN)
-			#define EVAL_SFNN
-		#else
-			#define EVAL_NNUE
-		#endif
+	#if defined(YANEURAOU_ENGINE_NNUE)
+		#define EVAL_NNUE
 
 		// NNUEの使いたい評価関数アーキテクチャの選択
 		//
@@ -449,6 +461,13 @@ constexpr int MAX_PLY_NUM = 246;
 		// #define EVAL_NNUE_HALFKPE9
 	#endif
 
+	// p2shogi(rust) NNUE 評価関数の移植版。
+	// 標準NNUEエンジンの探索/USIをそのまま使い、Eval::evaluate() を p2 専用 evaluator
+	// (eval/p2nnue/) で置換する。差分更新は使わず evaluate() で毎回フル再計算する。
+	#if defined(YANEURAOU_ENGINE_P2NNUE)
+		#define EVAL_P2NNUE
+	#endif
+
 #endif // defined(YANEURAOU_ENGINE_KPPT) || ...
 
 // --- Deep Learning系のエンジン ふかうら王(dlshogi互換エンジン)
@@ -461,6 +480,7 @@ constexpr int MAX_PLY_NUM = 246;
 	#define USE_MATE_1PLY
 	#define USE_MATE_SOLVER
 	#define USE_MATE_DFPN
+	#define USE_PIECE_VALUE
 	#define ENABLE_TEST_CMD
 
 	// 勝率の集計を行う型としてdouble型を用いる。
@@ -486,7 +506,7 @@ constexpr int MAX_PLY_NUM = 246;
 // --- やねうら王詰将棋エンジンとして実行ファイルを公開するとき用の設定集
 
 #if defined(YANEURAOU_MATE_ENGINE)
-	// 🤔 CLASSIC EVALは用いないが、KEEP_LAST_MOVEのようなStateInfo上の
+	// 🤔 CLASSIC EVALは用いないが、Position::materialのような
 	//     追加メンバー変数を用いるには、USE_CLASSIC_EVALを定義する必要がある。
 	#define USE_CLASSIC_EVAL
 	#undef MAX_PLY_NUM
@@ -495,6 +515,7 @@ constexpr int MAX_PLY_NUM = 246;
 	//#define LONG_EFFECT_LIBRARY
 	#define USE_MATE_SOLVER
 	#define USE_MATE_DFPN
+	#define USE_PIECE_VALUE
 	#define ENABLE_TEST_CMD
 #endif
 
@@ -502,8 +523,10 @@ constexpr int MAX_PLY_NUM = 246;
 // --- ユーザーの自作エンジンとして実行ファイルを公開するとき用の設定集
 
 #if defined(USER_ENGINE)
+	//#define USE_SEE
 	//#define USE_EVAL
 	//#define EVAL_MATERIAL
+	//#define USE_PIECE_VALUE
 #endif
 
 // --------------------
@@ -518,6 +541,19 @@ constexpr int MAX_PLY_NUM = 246;
 
 	// 千日手検出を簡略化する
 	#define ENABLE_QUICK_DRAW
+#endif
+
+// --------------------
+//   P2NNUE threat 差分更新用: lastMove/lastMovedPieceType を必須化
+// --------------------
+// threat 入力の incremental delta は st->lastMove(from/to/drop)と
+// st->lastMovedPieceType(成り前駒種)を参照するため、KEEP_LAST_MOVE が必要。
+// FOR_TOURNAMENT ブロックが KEEP_LAST_MOVE を undef するため、その後で再定義する。
+// コスト = do_move で Move 1個 + PieceType 1個の store のみ(微小)。
+#if defined(YANEURAOU_ENGINE_P2NNUE)
+	#if !defined(KEEP_LAST_MOVE)
+		#define KEEP_LAST_MOVE
+	#endif
 #endif
 
 // --------------------
@@ -555,6 +591,20 @@ constexpr int MAX_PLY_NUM = 246;
 // memoryがalignされているかのassert
 #define ASSERT_ALIGNED(ptr, alignment) assert(reinterpret_cast<uintptr_t>(ptr) % alignment == 0)
 
+// --- declaration of unreachablity
+
+// switchにおいてdefaultに到達しないことを明示して高速化させる
+// 💡 デバッグ時は普通にしとかないと変なアドレスにジャンプして原因究明に時間がかかる。
+// 📝 StockfishでUtility::sf_assume(bool)が追加された。そちらも参考にすること。
+
+#if defined(_MSC_VER)
+#define UNREACHABLE ASSERT_LV3(false); __assume(0);
+#elif defined(__GNUC__)
+#define UNREACHABLE ASSERT_LV3(false); __builtin_unreachable();
+#else
+#define UNREACHABLE ASSERT_LV3(false);
+#endif
+
 // --- alignment tools
 
 // 構造体などのアライメントを揃えるための宣言子
@@ -583,12 +633,26 @@ constexpr bool pretty_jp = false;
 #define HASH_KEY_BITS 128
 #endif
 
-// --- hash key bits
+// --- hash key bits and TT_CLUSTER_SIZE
 
-// HASH_KEY および HASH_KEY_BITSの定義。
 #if !defined(HASH_KEY_BITS)
 #define HASH_KEY_BITS 64
 #endif
+
+// ここ、typedef ではなく usingで書きたいが、現時点でKey64,Key128,Key256が未定義なので…。
+
+#if HASH_KEY_BITS <= 64
+#define Key Key64
+#elif HASH_KEY_BITS <= 128
+#define Key Key128
+#else
+#define Key Key256
+#endif
+
+#if !defined(TT_CLUSTER_SIZE)
+#define TT_CLUSTER_SIZE 3
+#endif
+
 
 // --- lastMove
 
@@ -635,17 +699,9 @@ constexpr bool pretty_jp = false;
 	#define TARGET_CPU "SSSE3"
 	#elif defined(USE_SSE2)
 	#define TARGET_CPU "SSE2"
-	#elif defined(USE_NEON_DOTPROD)
-	#define TARGET_CPU "ARMV8_DOTPROD"
-	#elif defined(USE_NEON)
-	#define TARGET_CPU "ARMV8"
 	#else
 	#define TARGET_CPU "noSSE"
 	#endif
-#endif
-
-#if defined(EVAL_NNUE) && defined(EVAL_SFNN)
-#error EVAL_NNUE and EVAL_SFNN are mutually exclusive.
 #endif
 
 // 上位のCPUをターゲットとするなら、その下位CPUの命令はすべて使えるはずなので…。
@@ -698,10 +754,10 @@ constexpr bool pretty_jp = false;
 	// hafeKPE9には利きが必要
 	#define LONG_EFFECT_LIBRARY
 	#define USE_BOARD_EFFECT_PREV
-#elif defined(EVAL_SFNN)
-	#define EVAL_TYPE_NAME "SFNN"
 #elif defined(EVAL_NNUE) // それ以外のNNUEなので標準NNUE halfKP256だと思われる。
 	#define EVAL_TYPE_NAME "NNUE"
+#elif defined(EVAL_P2NNUE)
+	#define EVAL_TYPE_NAME "P2NNUE"
 #elif defined(EVAL_DEEP)
 	#if defined(ONNXRUNTIME)
 		#if defined(ORT_CPU)

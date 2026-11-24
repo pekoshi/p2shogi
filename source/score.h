@@ -8,9 +8,7 @@
 
 namespace YaneuraOu {
 
-#if STOCKFISH
-class Position;
-#endif
+//class Position;
 
 // GUIで要求されている評価値の単位でValueを保持しているclass
 class Score {
@@ -20,14 +18,12 @@ class Score {
 		// 詰みまでの手数
         int plies;
     };
-#if STOCKFISH
 
-	struct Tablebase {
-        int  plies;
-        bool win;
-    };
+    //struct Tablebase {
+    //    int  plies;
+    //    bool win;
+    //};
 	// 💡 将棋ではTablebaseは使わない
-#endif
 
 	// 出力用に変換された評価値
     struct InternalUnits {
@@ -39,11 +35,9 @@ class Score {
 	// ValueからこのScore構造体を構築する。
 	// 💡 Stockfishでは、Position classが勝率への変換パラメーターを保持しているので
 	//     変換に際してPosition classが必要なのだが、やねうら王では使わないのでコメントアウト。
-#if STOCKFISH
-    Score(Value v, const Position& pos);
-#else
     Score(Value v /*, const Position& pos*/);
 
+#if !STOCKFISH
 	// 🌈 Valueの値を(cpへの変換をせずに)そのままScoreに変換する。
     static Score from_internal_value(Value v);
 	// 🌈 いま保持している値をValueに変換する。
@@ -68,12 +62,8 @@ class Score {
     }
 
    private:
-#if STOCKFISH
-    std::variant<Mate, Tablebase, InternalUnits> score;
-#else
 	// MateかInternalUnitsかのいずれか。
     std::variant<Mate, /* Tablebase ,*/ InternalUnits> score;
-#endif
 };
 
 }

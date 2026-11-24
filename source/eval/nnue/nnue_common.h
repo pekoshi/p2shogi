@@ -4,19 +4,15 @@
 #ifndef CLASSIC_NNUE_COMMON_H_INCLUDED
 #define CLASSIC_NNUE_COMMON_H_INCLUDED
 
-#include <cstdint>
-
 #include <algorithm>   // std::min
 #include <cassert>
 #include <cstring>		// std::memcpy()
 
 #include "../../config.h"
-#include "../../extra/tools.h"
 
-#if (defined(EVAL_NNUE) || defined(EVAL_SFNN))
+#if defined(EVAL_NNUE)
 
 #include "../../misc.h"  // Tools::Result
-#include "../../types.h"
 
 #if defined(USE_WASM_SIMD)
 #include "./wasm_simd.h"
@@ -54,17 +50,20 @@ namespace YaneuraOu {
 
 namespace Eval::NNUE {
 
+  // エンディアン判定
+#if defined(__BYTE_ORDER__) && (__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__)
+  constexpr bool IsLittleEndian = true;
+#else
+  constexpr bool IsLittleEndian = false;
+#endif
+
   // Version of the evaluation file
   // 評価関数ファイルのバージョンを表す定数
-#if defined(ENABLE_SFNN_16BIT_WEIGHT)
-  constexpr u32 kVersion = 0x7AF32F17u;
-#else
-  constexpr u32 kVersion = 0x7AF32F16u;
-#endif
+  constexpr std::uint32_t kVersion = 0x7AF32F16u;
 
   // LEB128圧縮データを識別するためのmagic string
   constexpr const char        Leb128MagicString[] = "COMPRESSED_LEB128";
-  constexpr const usize Leb128MagicStringSize = sizeof(Leb128MagicString) - 1;
+  constexpr const std::size_t Leb128MagicStringSize = sizeof(Leb128MagicString) - 1;
 
   // Constant used in evaluation value calculation
   // 評価値の計算で利用する定数
@@ -74,23 +73,23 @@ namespace Eval::NNUE {
 
   // Size of cache line (in bytes)
   // キャッシュラインのサイズ（バイト単位）
-  constexpr usize kCacheLineSize = 64;
+  constexpr std::size_t kCacheLineSize = 64;
 
   // SIMD width (in bytes)
   // SIMD幅（バイト単位）
   #if defined(USE_AVX2)
-  constexpr usize kSimdWidth = 32;
+  constexpr std::size_t kSimdWidth = 32;
   #elif defined(USE_SSE2)
-  constexpr usize kSimdWidth = 16;
+  constexpr std::size_t kSimdWidth = 16;
   #elif defined(USE_MMX)
-  constexpr usize kSimdWidth = 8;
+  constexpr std::size_t kSimdWidth = 8;
 
   #elif defined(USE_NEON)
-  constexpr usize kSimdWidth = 16;
+  constexpr std::size_t kSimdWidth = 16;
   #elif defined(USE_WASM_SIMD)
-  constexpr usize kSimdWidth = 16;
+  constexpr std::size_t kSimdWidth = 16;
   #endif
-  constexpr usize kMaxSimdWidth = 32;
+  constexpr std::size_t kMaxSimdWidth = 32;
 
   // unique number for each piece type on each square
   // 将棋では、BonaPieceで事足りるのでここでは定義しない。
@@ -112,16 +111,16 @@ namespace Eval::NNUE {
     PS_B_KING   = 11 * SQUARE_NB + 1,
     PS_END2     = 12 * SQUARE_NB + 1
   };
-  extern const u32 kpp_board_index[PIECE_NB][COLOR_NB];
+  extern const uint32_t kpp_board_index[PIECE_NB][COLOR_NB];
 
   #endif
 
   // Type of input feature after conversion
   // 変換後の入力特徴量の型
-  using TransformedFeatureType = u8;
+  using TransformedFeatureType = std::uint8_t;
 
   // インデックスの型
-  using IndexType = u32;
+  using IndexType = std::uint32_t;
 
   // Round n up to be a multiple of base
   // n以上で最小のbaseの倍数を求める
@@ -137,11 +136,11 @@ namespace Eval::NNUE {
   inline IntType read_little_endian(std::istream& stream) {
 
       IntType result;
-      u8 u[sizeof(IntType)];
+      std::uint8_t u[sizeof(IntType)];
       typename std::make_unsigned<IntType>::type v = 0;
 
       stream.read(reinterpret_cast<char*>(u), sizeof(IntType));
-      for (usize i = 0; i < sizeof(IntType); ++i)
+      for (std::size_t i = 0; i < sizeof(IntType); ++i)
           v = (v << 8) | u[sizeof(IntType) - i - 1];
 
       std::memcpy(&result, &v, sizeof(IntType));
@@ -150,17 +149,17 @@ namespace Eval::NNUE {
 
   // little-endianで複数の整数を読み込む
   template <typename IntType>
-  inline void read_little_endian(std::istream& stream, IntType* out, usize count) {
+  inline void read_little_endian(std::istream& stream, IntType* out, std::size_t count) {
 	  if (IsLittleEndian)
 		  stream.read(reinterpret_cast<char*>(out), sizeof(IntType) * count);
 	  else
-		  for (usize i = 0; i < count; ++i)
+		  for (std::size_t i = 0; i < count; ++i)
 			  out[i] = read_little_endian<IntType>(stream);
   }
 
   // signed LEB128で圧縮された整数を読み込む
   template<typename IntType>
-  inline void read_leb_128(std::istream& stream, IntType* out, usize count) {
+  inline void read_leb_128(std::istream& stream, IntType* out, std::size_t count) {
 
 	  // Check the presence of our LEB128 magic string
 	  char leb128MagicString[Leb128MagicStringSize];
@@ -169,16 +168,16 @@ namespace Eval::NNUE {
 
 	  static_assert(std::is_signed_v<IntType>, "Not implemented for unsigned types");
 
-	  const u32 BUF_SIZE = 4096;
-	  u8        buf[BUF_SIZE];
+	  const std::uint32_t BUF_SIZE = 4096;
+	  std::uint8_t        buf[BUF_SIZE];
 
-	  auto bytes_left = read_little_endian<u32>(stream);
+	  auto bytes_left = read_little_endian<std::uint32_t>(stream);
 
-	  u32 buf_pos = BUF_SIZE;
-	  for (usize i = 0; i < count; ++i)
+	  std::uint32_t buf_pos = BUF_SIZE;
+	  for (std::size_t i = 0; i < count; ++i)
 	  {
 		  IntType result = 0;
-		  usize  shift = 0;
+		  size_t  shift = 0;
 		  do
 		  {
 			  if (buf_pos == BUF_SIZE)
@@ -187,7 +186,7 @@ namespace Eval::NNUE {
 				  buf_pos = 0;
 			  }
 
-			  u8 byte = buf[buf_pos++];
+			  std::uint8_t byte = buf[buf_pos++];
 			  --bytes_left;
 			  result |= (byte & 0x7f) << shift;
 			  shift += 7;
@@ -207,6 +206,6 @@ namespace Eval::NNUE {
 } // namespace Eval::NNUE
 } // namespace YaneuraOu
 
-#endif  // (defined(EVAL_NNUE) || defined(EVAL_SFNN))
+#endif  // defined(EVAL_NNUE)
 
 #endif // #ifndef NNUE_COMMON_H_INCLUDED

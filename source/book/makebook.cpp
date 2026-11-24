@@ -3,8 +3,6 @@
 #if defined (ENABLE_MAKEBOOK_CMD)
 
 #include "book.h"
-#include "../misc.h"
-#include "../extra/tools.h"
 #include "../position.h"
 #include <sstream>
 
@@ -25,31 +23,24 @@ namespace Book
 	// ---------------------------------------------------------------------------------------------
 
 	// makebookコマンドの処理本体
-	// フォーマット等については、やねうら王Wiki「ソースコード解説」「USI拡張コマンド」を見ること。
-	// https://github.com/yaneurao/YaneuraOu/wiki/やねうら王のソースコード解説
-	// https://github.com/yaneurao/YaneuraOu/wiki/USI%E6%8B%A1%E5%BC%B5%E3%82%B3%E3%83%9E%E3%83%B3%E3%83%89
+	// フォーマット等については docs/解説.txt, docs/USI拡張コマンド.txt を見ること。
     void makebook(IEngine& engine, istringstream& is)
 	{
         // このタイミングでisready()で初期化しておく。
         // (そうしないとPosition classやevalが使えなくて困る)
         engine.isready();
-		Tools::ProgressBar::enable(true);
 
 		string token;
 		is >> token;
 
 		// 2025年に作ったmakebook拡張コマンド
         if (makebook2025(is, token, engine.get_options()))
-		{
-			Tools::ProgressBar::enable(false);
 			return;
-		}
 
 		// いずれのコマンドも処理しなかったので、使用方法を出力しておく。
 
 		cout << "usage" << endl;
 		cout << "> makebook peta_shock book.db user_book1.db" << endl;
-		Tools::ProgressBar::enable(false);
 	}
 
 } // namespace Book

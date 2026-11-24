@@ -1,5 +1,4 @@
 ﻿#include "mate.h"
-#include "../misc.h"
 #if defined(USE_MATE_SOLVER)
 #include "../position.h"
 #include "mate_move_picker.h"
@@ -20,10 +19,12 @@ namespace Mate {
 	{
 		// OR節点
 
+		StateInfo si;
+		StateInfo si2;
 
 		for (const auto& m : MovePicker<true, INCHECK , GEN_ALL , false /* no ordering */>(pos))
 		{
-			pos.do_move(m, true);
+			pos.do_move(m, si, true);
 
 			// and node
 
@@ -61,7 +62,7 @@ namespace Mate {
 						if (pos.gives_check(m2))
 							goto NEXT_CHECK;
 
-						pos.do_move(m2, /* givesCheck */false);
+						pos.do_move(m2, si2, /* givesCheck */false);
 
 						// mate_1ply()は王手がかかっている時に呼べないが、
 						// この局面は王手はかかっていないから問題ない。
@@ -117,8 +118,9 @@ namespace Mate {
 			// これが合法手であることは、MovePickerのほうで保証されている。
 			auto m = Move(ml);
 
+			StateInfo state;
 			// これが王手であることはわかっているので第3引数はtrueで固定しておく。
-			pos.do_move(m, true);
+			pos.do_move(m, state, true);
 
 			// and node
 
@@ -144,7 +146,7 @@ namespace Mate {
 				found_mate = mated_even_ply<GEN_ALL>(pos, ply - 1) == Move::none() /* 回避手がない == 詰み */;
 				break;
 
-			default: ASSERT_LV3(false); sf_unreachable();
+			default: UNREACHABLE;
 			}
 
 			pos.undo_move(m);
@@ -188,8 +190,8 @@ namespace Mate {
 			const bool givesCheck = pos.gives_check(m);
 
 			// 1手動かす
-
-			pos.do_move(m, givesCheck);
+			StateInfo state;
+			pos.do_move(m, state, givesCheck);
 
 			// or node
 
@@ -223,7 +225,7 @@ namespace Mate {
 					// 詰みが見つからなかったら、逃れている。
 				break;
 
-			default: ASSERT_LV3(false); sf_unreachable();
+			default: UNREACHABLE;
 			}
 
 			pos.undo_move(m);
