@@ -53,7 +53,7 @@ flowchart TD
 | OPN の教師 | DL 水匠のラベルを付けた蒸留データ 001〜018 (ponkotsu) | Hugging Face `ngs436/dlsuisho-ponkotsu-distilled` (`penguinkumimanu/ponkotsuWCSC36` の 001-018 と sha256 一致、 と記録) | shard ごとの sha256 [未]。 利用条件はデータの配布元に従う |
 | 本体 KH 段の教師 | `fgb_tr.psv` (198,007,603 局面) | 自作: 土台の教師 + floodgate 上位陣の棋譜から作った局面の注入 (`fgblend_top3q.psv` 200,007,680 局面を train / val に分けたもの) | 🚨**第三者の棋譜と教師に由来するため配布しない**。 代わりの公開データで追試すると値は変わる |
 | 進行度の係数 | `progress.bin` (NAGISA v3.1、 GPLv3) | 我々の Releases に同梱 | sha256 `e7ed0eef88868335f9a46c58a121dccb5ad82a5eb1c8ee12de90365ab351e37d` |
-| 出発点 | `top3q-102` の `optimiser_state/weights.bin` (f32) と `raw.bin` | [未: 配布の可否と場所] | `quantised.bin` の sha256 `687a36033f689e37085381f14de11c242bff17c899ebf012a326ea3a6ef9c1b4` |
+| 出発点 | `top3q-102` の `optimiser_state/weights.bin` (f32) と `raw.bin` | Releases の [top3q-102](https://github.com/pekoshi/p2shogi/releases/tag/top3q-102) (`top3q-102_f32_checkpoint.zip`、 optimizer の状態は含まない) | `quantised.bin` の sha256 `687a36033f689e37085381f14de11c242bff17c899ebf012a326ea3a6ef9c1b4` |
 
 ## 3. 前処理 (OPN の教師)
 
@@ -81,7 +81,7 @@ psv_bucket_filter.exe --in "<ponko_002.psv>,…,<ponko_018.psv>" \
 
 ```bash
 shogi_layerstack.exe --data <fgb_tr.psv> --data-format psv --interleave-file-batches 1 \
-  --resume <top3q-102> --start-superbatch 0 --superbatches 4 --batches-per-superbatch 24415 --save-rate 1 \
+  --resume-weights-only <top3q-102>/optimiser_state --start-superbatch 0  # 我々の実行は --resume <top3q-102> (optimizer の状態つき) --superbatches 4 --batches-per-superbatch 24415 --save-rate 1 \
   --batch-size 4096 --lr 0.000006 --warmup-batches 500 --lr-gamma 1.0 --lr-step 1 \
   --wdl 0.15 --scale 600 --loss-power 2.6 --l0 1024 --l1 16 --l2 64 --psqt \
   --threat --threat-out 64 --threat-freeze-hard --bucket-mode progress8kpabs --progress-coeff <progress.bin> \

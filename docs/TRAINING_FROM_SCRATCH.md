@@ -280,7 +280,7 @@ _base_ctl90 (SB90、 それ以前は非公開の記録のみ)
               └ fti32_write.py --opn → fc1prec_write.py --opn → opn.bin
 ```
 
-- 4.2 の「0 から」の段の代わりに、 我々は `top3q-102` まで継ぎ足した checkpoint を使っています。 `top3q-102` の f32 重みの配布の可否は未定です。
+- 4.2 の「0 から」の段の代わりに、 我々は `top3q-102` まで継ぎ足した checkpoint を使っています。 `top3q-102` の f32 重み (`raw.bin`、 `optimiser_state/weights.bin`、 `quantised.bin`) は Releases の [top3q-102](https://github.com/pekoshi/p2shogi/releases/tag/top3q-102) で配布しています。 optimizer の momentum などの状態は含まないので、 `--resume` ではなく `--resume-weights-only <展開先>/top3q-102/optimiser_state` で読み込んでください (我々の実行は状態つきの `--resume` だったので、 学習の軌跡は完全には一致しません)。
 - 本体の教師 (`novel_ext3`、 `fgblend_top3q`、 `fgb_tr`) は配布しません。 公開データで追うと値は変わります。
 - 我々の出力の sha256 (入力が我々のものなら書き直しの段は bit 単位で一致するはず): `nn.bin` = `a83bf75edf0db2bea08ede4b92ac721b383e589caeffdfcf49652a43f067af79`、 `opn.bin` = `e8ecccd6aa2d64f4347a1222fcc265ceac814565a3c1fcad9f2a028a627db732`、 `kh.bin` = `4186aba33a1fe47849761fca5c369aa6bd63a4511e3fb7a6bee125e59a2c803f`。
 
