@@ -27,6 +27,7 @@ p2shogi_v9/
     nn.bin        本体の評価関数
     opn.bin       序盤用の評価関数
     kh.bin        玉周りの補助入力の表
+    kh.bin.json   kh.bin の付属情報 (kh.bin と一緒に置く)
     progress.bin  進行度 (LayerStack の bucket 選択に使う)
 ```
 
@@ -53,6 +54,23 @@ make -j4 normal COMPILER="clang++ -static" YANEURAOU_EDITION=YANEURAOU_ENGINE_P2
 -DP2_LZ_ROWPF=1 -DP2_SRCH_BUNDLE_A -DP2_LZ_D1FAST -DP2_TR_STORE32 -DP2_ACC_PIECEWISE -DP2_FC0_PF
 -DP2_FT_KS=3 -DP2_FT_OUT16=5 -DP2_FT_SPARSE16 -DP2_FC1_PREC -DP2_BUCKET_OFFSET -DP2_OPTIMISM
 ```
+
+## 資料
+
+`docs/` に、仕組みの解説と、自分で評価関数を作る・機構を足すための資料があります。
+
+| 資料 | 中身 |
+|---|---|
+| [docs/OVERVIEW.md](docs/OVERVIEW.md) | 全体像、経緯、到達点 (入口) |
+| [docs/TECHNICAL_NOTES.md](docs/TECHNICAL_NOTES.md) | 技術解説 (評価関数・探索・SPSA・計測の方法と教訓) |
+| [docs/TRAINING_FROM_SCRATCH.md](docs/TRAINING_FROM_SCRATCH.md) | 評価関数を一から作る手順 |
+| [docs/REPRODUCE.md](docs/REPRODUCE.md) | 公開版の net を作った手順の追試 |
+| [docs/MECHANISMS_GUIDE.md](docs/MECHANISMS_GUIDE.md) | 独自機構ごとの解説 (場所・オン/オフ・計測・失敗) |
+| [docs/CHANGES_FROM_UPSTREAM_engine.md](docs/CHANGES_FROM_UPSTREAM_engine.md) | やねうら王からの変更点 |
+| [docs/SPEEDUPS_STORY.md](docs/SPEEDUPS_STORY.md)、 [docs/speedups/](docs/speedups/) | 高速化の読み物と個別仕様 |
+| [docs/FUTURE_WORK.md](docs/FUTURE_WORK.md) | 今後の課題 |
+
+学習・変換に使う python スクリプトは [pekoshi/rshogi](https://github.com/pekoshi/rshogi/tree/p2shogi/tools/python) の `p2shogi` ブランチ `tools/python/` にあります。
 
 ## 関連リポジトリ
 
