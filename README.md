@@ -4,6 +4,15 @@
 
 USI では `id name p2shogi v9` / `id author pekoshi` と名乗ります。
 
+## ダウンロード
+
+| ファイル | 中身 |
+|---|---|
+| [p2shogi_v9_windows_avx2.zip](https://github.com/pekoshi/p2shogi/releases/download/v9/p2shogi_v9_windows_avx2.zip) (約 200MB) | エンジン本体 (`p2shogi_v9.exe` と `eval/` 一式)。展開してそのまま使えます |
+| [top3q-102_f32_checkpoint.zip](https://github.com/pekoshi/p2shogi/releases/download/top3q-102/top3q-102_f32_checkpoint.zip) (約 1.0GB) | 学習の出発点の checkpoint (追試・学習用) |
+
+リリースの一覧: https://github.com/pekoshi/p2shogi/releases (各リリースに SHA-256 も置いています)
+
 ## 特徴
 
 - 評価関数 p2nnue: HalfKA_hm + 利き (threat) 入力 + 玉周りの補助入力 (KH)、LayerStack 8 本、L1 1024。
@@ -18,7 +27,7 @@ USI では `id name p2shogi v9` / `id author pekoshi` と名乗ります。
 
 ## 使い方
 
-[Releases](../../releases) の zip を展開すると、次の構成になります。
+[v9 のリリース](https://github.com/pekoshi/p2shogi/releases/tag/v9) の zip を展開すると、次の構成になります。
 
 ```
 p2shogi_v9/
